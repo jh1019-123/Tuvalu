@@ -1,0 +1,202 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Pillar 4.1: Default-deny global safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Primitive Helpers ---
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isVerifiedOwner(userId) {
+      return isVerified() && request.auth.uid == userId;
+    }
+
+    function isValidTier(tier) {
+      return tier is string && tier in ['none', 'common', 'uncommon', 'epic', 'legendary', 'mythic'];
+    }
+
+    // --- Validation Blueprints ---
+    function isValidUserProfile(data) {
+      return data.keys().hasAll([
+        'uid',
+        'displayName',
+        'wins',
+        'losses',
+        'totalBattles',
+        'coins',
+        'fishCaughtCount',
+        'bestDishScore',
+        'rarestFishTier',
+        'createdAt',
+        'updatedAt'
+      ]) && data.keys().hasOnly([
+        'uid',
+        'displayName',
+        'wins',
+        'losses',
+        'totalBattles',
+        'coins',
+        'fishCaughtCount',
+        'bestDishScore',
+        'rarestFishTier',
+        'createdAt',
+        'updatedAt'
+      ])
+      && data.uid is string
+      && data.uid.size() >= 1 && data.uid.size() <= 128
+      && data.uid.matches('^[a-zA-Z0-9_\\-]+$')
+      && data.uid == request.auth.uid
+      && data.displayName is string
+      && data.displayName.size() >= 1 && data.displayName.size() <= 40
+      && data.wins is int && data.wins >= 0 && data.wins <= 100000
+      && data.losses is int && data.losses >= 0 && data.losses <= 100000
+      && data.totalBattles is int && data.totalBattles >= 0 && data.totalBattles <= 200000
+      && data.totalBattles == data.wins + data.losses
+      && data.coins is int && data.coins >= 0 && data.coins <= 10000000
+      && data.fishCaughtCount is int && data.fishCaughtCount >= 0 && data.fishCaughtCount <= 1000000
+      && data.bestDishScore is int && data.bestDishScore >= 0 && data.bestDishScore <= 1000
+      && isValidTier(data.rarestFishTier)
+      && data.createdAt is timestamp
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidLeaderboardEntry(data) {
+      return data.keys().hasAll([
+        'uid',
+        'displayName',
+        'chefTitle',
+        'wins',
+        'totalBattles',
+        'bestDishScore',
+        'rarestFishTier',
+        'isPublic',
+        'createdAt',
+        'updatedAt'
+      ]) && data.keys().hasOnly([
+        'uid',
+        'displayName',
+        'chefTitle',
+        'wins',
+        'totalBattles',
+        'bestDishScore',
+        'rarestFishTier',
+        'isPublic',
+        'createdAt',
+        'updatedAt'
+      ])
+      && data.uid is string
+      && data.uid.size() >= 1 && data.uid.size() <= 128
+      && data.uid.matches('^[a-zA-Z0-9_\\-]+$')
+      && data.uid == request.auth.uid
+      && data.displayName is string
+      && data.displayName.size() >= 1 && data.displayName.size() <= 40
+      && data.chefTitle is string
+      && data.chefTitle.size() >= 1 && data.chefTitle.size() <= 40
+      && data.wins is int && data.wins >= 0 && data.wins <= 100000
+      && data.totalBattles is int && data.totalBattles >= 0 && data.totalBattles <= 200000
+      && data.bestDishScore is int && data.bestDishScore >= 0 && data.bestDishScore <= 1000
+      && isValidTier(data.rarestFishTier)
+      && data.isPublic is bool
+      && data.createdAt is timestamp
+      && data.updatedAt is timestamp;
+    }
+
+    // --- Collection: /users/{userId} (Private Profile) ---
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isOwner(userId);
+      allow list: if false;
+
+      allow create: if isVerifiedOwner(userId)
+        && isValidId(userId)
+        && isValidUserProfile(incoming())
+        && incoming().wins >= 0 && incoming().wins <= 50
+        && incoming().losses >= 0 && incoming().losses <= 50
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isVerifiedOwner(userId)
+        && isValidId(userId)
+        && isValidUserProfile(incoming())
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().wins >= existing().wins
+        && incoming().wins <= existing().wins + 20
+        && incoming().losses >= existing().losses
+        && incoming().losses <= existing().losses + 20
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'displayName',
+          'wins',
+          'losses',
+          'totalBattles',
+          'coins',
+          'fishCaughtCount',
+          'bestDishScore',
+          'rarestFishTier',
+          'updatedAt'
+        ]);
+
+      allow delete: if false;
+    }
+
+    // --- Collection: /leaderboard/{userId} (Public Culinary Rank, Zero PII) ---
+    match /leaderboard/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || (resource != null && existing().isPublic == true));
+      allow list: if existing().isPublic == true;
+
+      allow create: if isVerifiedOwner(userId)
+        && isValidId(userId)
+        && isValidLeaderboardEntry(incoming())
+        && incoming().isPublic == true
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && existsAfter(/databases/$(database)/documents/users/$(userId))
+        && getAfter(/databases/$(database)/documents/users/$(userId)).data.wins == incoming().wins;
+
+      allow update: if isVerifiedOwner(userId)
+        && isValidId(userId)
+        && isValidLeaderboardEntry(incoming())
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && existsAfter(/databases/$(database)/documents/users/$(userId))
+        && getAfter(/databases/$(database)/documents/users/$(userId)).data.wins == incoming().wins
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'displayName',
+          'chefTitle',
+          'wins',
+          'totalBattles',
+          'bestDishScore',
+          'rarestFishTier',
+          'isPublic',
+          'updatedAt'
+        ]);
+
+      allow delete: if isVerifiedOwner(userId) && isValidId(userId);
+    }
+  }
+}

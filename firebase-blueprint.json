@@ -1,0 +1,153 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Private player profile storing Tuvalu fishing and cooking battle progression, win counts, and currency.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the player."
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "description": "Chef display name in Tuvalu."
+        },
+        "wins": {
+          "type": "integer",
+          "description": "Total cooking battle victories."
+        },
+        "losses": {
+          "type": "integer",
+          "description": "Total cooking battle losses."
+        },
+        "totalBattles": {
+          "type": "integer",
+          "description": "Total cooking battles completed."
+        },
+        "coins": {
+          "type": "integer",
+          "description": "Tuvalu fishing coins available for ingredients."
+        },
+        "fishCaughtCount": {
+          "type": "integer",
+          "description": "Total number of fish caught."
+        },
+        "bestDishScore": {
+          "type": "integer",
+          "description": "Highest total cooking score achieved."
+        },
+        "rarestFishTier": {
+          "type": "string",
+          "enum": ["none", "common", "uncommon", "epic", "legendary", "mythic"],
+          "description": "Highest rarity tier caught."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when profile was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when profile was last updated."
+        }
+      },
+      "required": [
+        "uid",
+        "displayName",
+        "wins",
+        "losses",
+        "totalBattles",
+        "coins",
+        "fishCaughtCount",
+        "bestDishScore",
+        "rarestFishTier",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "LeaderboardEntry": {
+      "title": "LeaderboardEntry",
+      "description": "Public leaderboard rank entry displaying a player's published win count and culinary rank without PII.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the ranked player."
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "description": "Public chef nickname."
+        },
+        "chefTitle": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "description": "Earned Tuvaluan culinary rank title."
+        },
+        "wins": {
+          "type": "integer",
+          "description": "Published victory count."
+        },
+        "totalBattles": {
+          "type": "integer",
+          "description": "Published total battles."
+        },
+        "bestDishScore": {
+          "type": "integer",
+          "description": "Best dish score achieved."
+        },
+        "rarestFishTier": {
+          "type": "string",
+          "enum": ["none", "common", "uncommon", "epic", "legendary", "mythic"],
+          "description": "Highest rarity fish caught."
+        },
+        "isPublic": {
+          "type": "boolean",
+          "description": "Whether the player opted to publish their rank publicly."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of first rank submission."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of latest rank sync."
+        }
+      },
+      "required": [
+        "uid",
+        "displayName",
+        "chefTitle",
+        "wins",
+        "totalBattles",
+        "bestDishScore",
+        "rarestFishTier",
+        "isPublic",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Private player profile and progression stats."
+    },
+    "/leaderboard/{userId}": {
+      "schema": { "$ref": "#/entities/LeaderboardEntry" },
+      "description": "Public Tuvalu Chef ranking entries containing published win counts and no PII."
+    }
+  }
+}

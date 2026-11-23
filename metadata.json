@@ -1,0 +1,6 @@
+{
+  "name": "Tuvalu: Laguna Chef",
+  "description": "3D Tuvalu Lagoon Fishing & Culinary Battle Game — Catch 5 rarity tiers of Pacific fish, buy island ingredients, cook through 3 interactive stages, and win over local Tuvaluan judges.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

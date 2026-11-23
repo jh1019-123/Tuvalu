@@ -1,0 +1,36 @@
+@import "tailwindcss";
+
+@layer base {
+  html,
+  body {
+    font-family: 'Plus Jakarta Sans', 'Noto Sans KR', system-ui, sans-serif;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    background-color: #062835;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior: none;
+  }
+}
+
+.font-display {
+  font-family: 'Fraunces', 'Noto Sans KR', serif;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Custom clean scrollbar inside modals */
+.tuvalu-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+.tuvalu-scroll::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.35);
+  border-radius: 999px;
+}
+.tuvalu-scroll::-webkit-scrollbar-thumb {
+  background: rgba(45, 212, 191, 0.45);
+  border-radius: 999px;
+}
