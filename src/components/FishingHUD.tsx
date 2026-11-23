@@ -1,9 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { FISH_TIERS } from '../data/tuvaluData';
-import { FishSpecies, FishingPhase } from '../types/game';
+import { FISHING_DIFFICULTY_BY_TIER, FISH_TIERS } from '../data/tuvaluData';
+import { FishSpecies, FishTier, FishingPhase } from '../types/game';
 
 interface FishingHUDProps {
   phase: FishingPhase;
+  hookedTier: FishTier;
   lastCaught: { species: FishSpecies; weightKg: number; coins: number } | null;
   onCast: () => void;
   onHookBite: () => void;
@@ -13,18 +14,34 @@ interface FishingHUDProps {
 
 export const FishingHUD: React.FC<FishingHUDProps> = ({
   phase,
+  hookedTier,
   lastCaught,
   onCast,
   onHookBite,
   onReelComplete,
   onCloseCatch,
 }) => {
+  const diff = FISHING_DIFFICULTY_BY_TIER[hookedTier];
+  const tierMeta = FISH_TIERS[hookedTier];
+
   // Reeling tension mini-bar state (0..100)
-  const [progress, setProgress] = useState(35);
-  const [cursor, setCursor] = useState(50);
-  const [zoneCenter, setZoneCenter] = useState(55);
+  // Green box = player-controlled catch zone; Thin marker = fish swimming
+  const [progress, setProgress] = useState(diff.startProgress);
+  const [boxCenter, setBoxCenter] = useState(50);
+  const [fishPos, setFishPos] = useState(52);
+  const [isSurging, setIsSurging] = useState(false);
+
   const holdingRef = useRef(false);
-  const stateRef = useRef({ progress: 35, cursor: 50, zoneCenter: 55, zoneVel: 18 });
+  const stateRef = useRef({
+    progress: 40,
+    boxCenter: 50,
+    boxVel: 0,
+    fishPos: 52,
+    fishVel: 16,
+    flipCooldown: 0.45,
+    surgeCooldown: 2.5,
+    surgeActiveLeft: 0,
+  });
 
   // 2-second lock when a fish is caught so the player can read the fish description
   const [catchLockRemainingMs, setCatchLockRemainingMs] = useState(2000);
@@ -50,13 +67,29 @@ export const FishingHUD: React.FC<FishingHUDProps> = ({
   useEffect(() => {
     if (phase !== 'reeling') {
       holdingRef.current = false;
+      setIsSurging(false);
       return;
     }
 
-    stateRef.current = { progress: 38, cursor: 50, zoneCenter: 52, zoneVel: 20 };
-    setProgress(38);
-    setCursor(50);
-    setZoneCenter(52);
+    const initSpeed = diff.zoneSpeedMin + Math.random() * (diff.zoneSpeedMax - diff.zoneSpeedMin);
+    const startFish = 50 + (Math.random() > 0.5 ? 10 : -10);
+    stateRef.current = {
+      progress: diff.startProgress,
+      boxCenter: 50,
+      boxVel: 0,
+      fishPos: startFish,
+      fishVel: (Math.random() > 0.5 ? 1 : -1) * initSpeed,
+      flipCooldown: 0.5,
+      surgeCooldown: diff.surgeIntervalSec > 0 ? diff.surgeIntervalSec * 0.8 : 999,
+      surgeActiveLeft: 0,
+    };
+    setProgress(diff.startProgress);
+    setBoxCenter(50);
+    setFishPos(startFish);
+    setIsSurging(false);
+
+    const minBoxCenter = diff.zoneHalfWidth;
+    const maxBoxCenter = 100 - diff.zoneHalfWidth;
 
     let rafId = 0;
     let last = performance.now();
@@ -66,25 +99,67 @@ export const FishingHUD: React.FC<FishingHUDProps> = ({
       last = now;
       const st = stateRef.current;
 
-      // Move green sweet spot organically
-      st.zoneCenter += st.zoneVel * dt;
-      if (st.zoneCenter > 78) {
-        st.zoneCenter = 78;
-        st.zoneVel = -Math.abs(18 + Math.random() * 18);
-      } else if (st.zoneCenter < 22) {
-        st.zoneCenter = 22;
-        st.zoneVel = Math.abs(18 + Math.random() * 18);
+      // Move green box (player controls: hold Space/Pointer to move right, release to fall left)
+      const accel = holdingRef.current ? diff.riseAccel : -diff.fallAccel;
+      st.boxVel += accel * dt;
+      st.boxVel *= Math.max(0, 1 - diff.drag * dt);
+      st.boxVel = Math.max(-diff.maxVel, Math.min(diff.maxVel, st.boxVel));
+      st.boxCenter += st.boxVel * dt;
+      if (st.boxCenter > maxBoxCenter) {
+        st.boxCenter = maxBoxCenter;
+        if (st.boxVel > 0) st.boxVel = 0;
+      } else if (st.boxCenter < minBoxCenter) {
+        st.boxCenter = minBoxCenter;
+        if (st.boxVel < 0) st.boxVel = 0;
       }
 
-      // Move player tension marker (hold Space or Pointer to rise, release to fall)
-      const accel = holdingRef.current ? 115 : -92;
-      st.cursor = Math.max(4, Math.min(96, st.cursor + accel * dt));
+      // Handle fish surges for Epic / Legendary / Mythic tiers
+      if (diff.surgeIntervalSec > 0) {
+        if (st.surgeActiveLeft > 0) {
+          st.surgeActiveLeft -= dt;
+          if (st.surgeActiveLeft <= 0) {
+            setIsSurging(false);
+          }
+        } else {
+          st.surgeCooldown -= dt;
+          if (st.surgeCooldown <= 0) {
+            st.surgeActiveLeft = 0.45;
+            st.surgeCooldown = diff.surgeIntervalSec * (0.9 + Math.random() * 0.35);
+            const boostSpeed = diff.zoneSpeedMax * diff.surgeSpeedMult;
+            const dir = st.fishPos > 50 ? -1 : 1;
+            st.fishVel = dir * boostSpeed;
+            setIsSurging(true);
+          }
+        }
+      }
 
-      const inZone = Math.abs(st.cursor - st.zoneCenter) <= 16;
-      st.progress += (inZone ? 34 : -22) * dt;
+      // Organic fish direction changes scaled by tier
+      st.flipCooldown -= dt;
+      if (st.flipCooldown <= 0 && st.surgeActiveLeft <= 0) {
+        if (Math.random() < diff.directionFlipChance * dt * 2.2) {
+          const nextSpeed = diff.zoneSpeedMin + Math.random() * (diff.zoneSpeedMax - diff.zoneSpeedMin);
+          st.fishVel = (st.fishVel >= 0 ? -1 : 1) * nextSpeed;
+          st.flipCooldown = 0.42;
+        }
+      }
 
-      setCursor(st.cursor);
-      setZoneCenter(st.zoneCenter);
+      // Move thin fish marker
+      st.fishPos += st.fishVel * dt;
+      if (st.fishPos > 95) {
+        st.fishPos = 95;
+        const speed = diff.zoneSpeedMin + Math.random() * (diff.zoneSpeedMax - diff.zoneSpeedMin);
+        st.fishVel = -speed * (st.surgeActiveLeft > 0 ? diff.surgeSpeedMult : 1);
+      } else if (st.fishPos < 5) {
+        st.fishPos = 5;
+        const speed = diff.zoneSpeedMin + Math.random() * (diff.zoneSpeedMax - diff.zoneSpeedMin);
+        st.fishVel = speed * (st.surgeActiveLeft > 0 ? diff.surgeSpeedMult : 1);
+      }
+
+      const inZone = Math.abs(st.fishPos - st.boxCenter) <= diff.zoneHalfWidth;
+      st.progress += (inZone ? diff.gainPerSec : -diff.drainPerSec) * dt;
+
+      setBoxCenter(st.boxCenter);
+      setFishPos(st.fishPos);
       setProgress(Math.max(0, Math.min(100, st.progress)));
 
       if (st.progress >= 100) {
@@ -100,7 +175,7 @@ export const FishingHUD: React.FC<FishingHUDProps> = ({
 
     rafId = requestAnimationFrame(step);
     return () => cancelAnimationFrame(rafId);
-  }, [phase, onReelComplete]);
+  }, [phase, diff, onReelComplete]);
 
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
@@ -147,6 +222,7 @@ export const FishingHUD: React.FC<FishingHUDProps> = ({
 
   const lockSecondsText = Math.ceil(catchLockRemainingMs / 1000);
   const lockBarPct = Math.max(0, Math.min(100, ((2000 - catchLockRemainingMs) / 2000) * 100));
+  const starText = '★'.repeat(diff.stars) + '☆'.repeat(5 - diff.stars);
 
   return (
     <div className="pointer-events-none fixed inset-x-0 bottom-16 sm:bottom-24 z-30 flex justify-center px-3 sm:px-4">
@@ -167,7 +243,7 @@ export const FishingHUD: React.FC<FishingHUDProps> = ({
           onClick={onHookBite}
           className="pointer-events-auto min-h-[56px] rounded-2xl border-2 border-amber-300 bg-gradient-to-r from-amber-500 to-orange-500 px-7 py-4 text-base sm:text-lg font-black text-slate-950 shadow-2xl hover:from-amber-400 hover:to-orange-400 active:scale-[0.98] cursor-pointer"
         >
-          입질 왔다! 지금 터치 또는 [Space / E]로 챔질!
+          {diff.biteHintKo} ({tierMeta.labelKo}) 지금 터치 또는 [Space / E]로 챔질!
         </button>
       ) : null}
 
@@ -188,20 +264,35 @@ export const FishingHUD: React.FC<FishingHUDProps> = ({
             holdingRef.current = false;
           }}
         >
-          <div className="flex items-center justify-between text-xs font-bold text-cyan-100">
-            <span>릴 당기기! (화면/버튼을 꾹 누르면 게이지 상승)</span>
-            <span className="tabular-nums text-amber-300">{Math.round(progress)}%</span>
+          <div className="flex items-center justify-between gap-2 text-xs font-bold text-cyan-100">
+            <span>릴 당기기! (꾹 누르면 초록 박스 우측 이동)</span>
+            <div className="flex items-center gap-1.5">
+              {isSurging ? (
+                <span className="rounded bg-rose-500/85 px-1.5 py-0.5 text-[10px] font-black text-white">
+                  몸부림!
+                </span>
+              ) : null}
+              <span
+                className={`rounded border px-1.5 py-0.5 text-[10px] font-extrabold ${tierMeta.bgClass} ${tierMeta.borderClass} ${tierMeta.textClass}`}
+              >
+                {tierMeta.labelKo} {starText}
+              </span>
+              <span className="tabular-nums text-amber-300">{Math.round(progress)}%</span>
+            </div>
           </div>
 
-          {/* Sweet spot track */}
+          {/* Sweet spot track: green box (player) + thin marker (fish) */}
           <div className="relative mt-3 h-8 w-full overflow-hidden rounded-xl bg-slate-900/90 border border-white/15">
             <div
               className="absolute top-0 bottom-0 rounded-lg bg-emerald-400/40 border border-emerald-300/80"
-              style={{ left: `${zoneCenter - 16}%`, width: '32%' }}
+              style={{
+                left: `${boxCenter - diff.zoneHalfWidth}%`,
+                width: `${diff.zoneHalfWidth * 2}%`,
+              }}
             />
             <div
-              className="absolute top-0.5 bottom-0.5 w-3.5 -translate-x-1/2 rounded-full bg-amber-300 shadow"
-              style={{ left: `${cursor}%` }}
+              className="absolute top-0.5 bottom-0.5 w-2.5 -translate-x-1/2 rounded-full bg-amber-300 shadow"
+              style={{ left: `${fishPos}%` }}
             />
           </div>
 
@@ -227,7 +318,7 @@ export const FishingHUD: React.FC<FishingHUDProps> = ({
             }}
             className="mt-3 min-h-[48px] w-full touch-none rounded-xl bg-teal-500 py-3 text-sm font-extrabold text-slate-950 active:bg-teal-400 cursor-pointer"
           >
-            [Space] 또는 여기를 꾹 눌러 감아올리기
+            [Space] 또는 여기를 꾹 눌러 초록 박스 이동
           </button>
         </div>
       ) : null}

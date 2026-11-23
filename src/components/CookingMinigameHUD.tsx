@@ -1,13 +1,15 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { Flame, Sparkles, Utensils } from 'lucide-react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Check, Flame, SkipForward, Sparkles, Utensils, Wind } from 'lucide-react';
 import { soundEngine } from '../audio/soundEngine';
-import { INGREDIENT_CATALOG } from '../data/tuvaluData';
+import { FISH_TIERS, INGREDIENT_CATALOG } from '../data/tuvaluData';
 import { BattlePlan, CookingStage, CookingStageScores } from '../types/game';
 
 interface CookingMinigameHUDProps {
   stage: CookingStage;
   plan: BattlePlan;
   onStageBurst: (station: 'wash' | 'prep' | 'cook', colorHex: number) => void;
+  onPotDrop: (colorHex: number, kind: 'fish' | 'meat' | 'vegetable' | 'salt' | 'spice') => void;
+  onFanStroke: () => void;
   onHeatChange: (heat: number) => void;
   onStageComplete: (stage: 'wash' | 'prep' | 'cook', score: number) => void;
   scores: CookingStageScores;
@@ -20,22 +22,54 @@ interface DirtSpot {
   clean: number; // 0..100
 }
 
+interface CutsceneItem {
+  id: string;
+  label: string;
+  colorHexStr: string;
+  colorHexNum: number;
+  kind: 'fish' | 'meat' | 'vegetable' | 'salt' | 'spice';
+}
+
+const FAN_DURATION_MS = 10000;
+const FAN_TARGET_FOR_100 = 45;
+
 export const CookingMinigameHUD: React.FC<CookingMinigameHUDProps> = ({
   stage,
   plan,
   onStageBurst,
+  onPotDrop,
+  onFanStroke,
   onHeatChange,
   onStageComplete,
   scores,
 }) => {
+  // Keep callback refs fresh so timer/rAF effects never tear down on parent re-render
+  const onStageBurstRef = useRef(onStageBurst);
+  onStageBurstRef.current = onStageBurst;
+  const onPotDropRef = useRef(onPotDrop);
+  onPotDropRef.current = onPotDrop;
+  const onFanStrokeRef = useRef(onFanStroke);
+  onFanStrokeRef.current = onFanStroke;
+  const onHeatChangeRef = useRef(onHeatChange);
+  onHeatChangeRef.current = onHeatChange;
+  const onStageCompleteRef = useRef(onStageComplete);
+  onStageCompleteRef.current = onStageComplete;
+
   // === STAGE 1: WASHING STATE ===
   const [spots, setSpots] = useState<DirtSpot[]>([]);
   const [washTimeLeft, setWashTimeLeft] = useState(14);
   const scrubbingRef = useRef(false);
   const lastScrubSfxRef = useRef(0);
+  const washCompletedRef = useRef(false);
+  const washFinishTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (stage !== 'wash') return;
+    washCompletedRef.current = false;
+    if (washFinishTimerRef.current) {
+      clearTimeout(washFinishTimerRef.current);
+      washFinishTimerRef.current = null;
+    }
     setSpots([
       { id: 1, x: 22, y: 36, clean: 0 },
       { id: 2, x: 46, y: 28, clean: 0 },
@@ -45,11 +79,21 @@ export const CookingMinigameHUD: React.FC<CookingMinigameHUDProps> = ({
       { id: 6, x: 78, y: 62, clean: 0 },
     ]);
     setWashTimeLeft(14);
+    return () => {
+      if (washFinishTimerRef.current) {
+        clearTimeout(washFinishTimerRef.current);
+        washFinishTimerRef.current = null;
+      }
+    };
   }, [stage]);
 
   useEffect(() => {
     if (stage !== 'wash') return;
     const timer = window.setInterval(() => {
+      if (washCompletedRef.current) {
+        clearInterval(timer);
+        return;
+      }
       setWashTimeLeft((t) => {
         if (t <= 1) {
           clearInterval(timer);
@@ -66,14 +110,17 @@ export const CookingMinigameHUD: React.FC<CookingMinigameHUDProps> = ({
     : 0;
 
   useEffect(() => {
-    if (stage !== 'wash') return;
+    if (stage !== 'wash' || washCompletedRef.current) return;
     if (washCleanAvg >= 100 || washTimeLeft === 0) {
+      washCompletedRef.current = true;
       const bonus = washCleanAvg >= 100 ? Math.min(10, Math.round(washTimeLeft * 0.8)) : 0;
       const finalScore = Math.min(100, Math.max(25, washCleanAvg + bonus));
-      const t = window.setTimeout(() => onStageComplete('wash', finalScore), 450);
-      return () => clearTimeout(t);
+      washFinishTimerRef.current = window.setTimeout(() => {
+        washFinishTimerRef.current = null;
+        onStageCompleteRef.current('wash', finalScore);
+      }, 380);
     }
-  }, [stage, washCleanAvg, washTimeLeft, onStageComplete]);
+  }, [stage, washCleanAvg, washTimeLeft]);
 
   const scrubAt = (clientX: number, clientY: number, rect: DOMRect) => {
     const px = ((clientX - rect.left) / rect.width) * 100;
@@ -94,7 +141,7 @@ export const CookingMinigameHUD: React.FC<CookingMinigameHUDProps> = ({
       if (now - lastScrubSfxRef.current > 120) {
         lastScrubSfxRef.current = now;
         soundEngine.playScrub();
-        onStageBurst('wash', 0x38bdf8);
+        onStageBurstRef.current('wash', 0x38bdf8);
       }
     }
   };
@@ -158,7 +205,7 @@ export const CookingMinigameHUD: React.FC<CookingMinigameHUDProps> = ({
       soundEngine.playChop(false);
     }
 
-    onStageBurst('prep', color);
+    onStageBurstRef.current('prep', color);
     setCutFeedback(label);
     cutScoresRef.current.push(pts);
     const nextIdx = cutIndex + 1;
@@ -168,14 +215,14 @@ export const CookingMinigameHUD: React.FC<CookingMinigameHUDProps> = ({
       const avg = Math.round(
         cutScoresRef.current.reduce((a, b) => a + b, 0) / cutScoresRef.current.length,
       );
-      window.setTimeout(() => onStageComplete('prep', avg), 500);
+      window.setTimeout(() => onStageCompleteRef.current('prep', avg), 500);
     }
   };
 
   useEffect(() => {
     if (stage !== 'prep') return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.code === 'Space') {
+      if (e.code === 'Space' && !e.repeat) {
         e.preventDefault();
         performKnifeSlice();
       }
@@ -184,142 +231,153 @@ export const CookingMinigameHUD: React.FC<CookingMinigameHUDProps> = ({
     return () => window.removeEventListener('keydown', onKey);
   });
 
-  // === STAGE 3: POT COOKING (DROP INGREDIENTS + HEAT CONTROL + DEVOTION STIR) ===
-  const potQueue = useRef<{ id: string; label: string }[]>([]);
-  const [droppedCount, setDroppedCount] = useState(0);
-  const [cookPhase, setCookPhase] = useState<'drop' | 'simmer'>('drop');
-  const [heat, setHeat] = useState(55);
-  const [devotionScore, setDevotionScore] = useState(0);
-  const [stirPromptActive, setStirPromptActive] = useState(false);
-  const [simmerTimeLeft, setSimmerTimeLeft] = useState(12);
-
-  const fanHeldRef = useRef(false);
-  const heatRef = useRef(55);
-  const devotionRef = useRef(0);
-  const sweetTicksRef = useRef(0);
-  const totalTicksRef = useRef(0);
-
-  useEffect(() => {
-    if (stage !== 'cook') return;
-    const ings = plan.ingredientIds
-      .map((id) => INGREDIENT_CATALOG.find((i) => i.id === id))
-      .filter((x): x is NonNullable<typeof x> => Boolean(x))
-      .map((i) => ({ id: i.id, label: i.nameKo }));
-    potQueue.current = [{ id: 'fish', label: plan.fishSpecies.nameKo }, ...ings];
-    setDroppedCount(0);
-    setCookPhase('drop');
-    heatRef.current = 55;
-    devotionRef.current = 0;
-    sweetTicksRef.current = 0;
-    totalTicksRef.current = 0;
-    setHeat(55);
-    setDevotionScore(0);
-    setStirPromptActive(false);
-    setSimmerTimeLeft(12);
-  }, [stage, plan]);
-
-  const handleDropNext = () => {
-    if (stage !== 'cook' || cookPhase !== 'drop') return;
-    soundEngine.playDropIngredient();
-    onStageBurst('cook', 0xfbbf24);
-    const next = droppedCount + 1;
-    setDroppedCount(next);
-    if (next >= potQueue.current.length) {
-      window.setTimeout(() => setCookPhase('simmer'), 280);
-    }
-  };
-
-  useEffect(() => {
-    if (stage !== 'cook' || cookPhase !== 'simmer') return;
-    let raf = 0;
-    let last = performance.now();
-    let timerAcc = 0;
-    let stirAcc = 0;
-
-    const loop = (now: number) => {
-      const dt = Math.min((now - last) / 1000, 0.05);
-      last = now;
-
-      // Heat drifts down unless fanning
-      const deltaHeat = fanHeldRef.current ? 46 * dt : -22 * dt;
-      heatRef.current = Math.max(5, Math.min(98, heatRef.current + deltaHeat));
-      setHeat(heatRef.current);
-      onHeatChange(heatRef.current / 100);
-
-      totalTicksRef.current += dt;
-      if (heatRef.current >= 42 && heatRef.current <= 78) {
-        sweetTicksRef.current += dt;
-      }
-
-      stirAcc += dt;
-      if (stirAcc > 2.8) {
-        stirAcc = 0;
-        setStirPromptActive(true);
-      }
-
-      timerAcc += dt;
-      if (timerAcc >= 1) {
-        timerAcc -= 1;
-        setSimmerTimeLeft((prev) => {
-          if (prev <= 1) {
-            const heatRatio = sweetTicksRef.current / Math.max(1, totalTicksRef.current);
-            const heatPts = Math.round(heatRatio * 70);
-            const finalCookScore = Math.min(100, Math.max(30, heatPts + devotionRef.current));
-            window.setTimeout(() => onStageComplete('cook', finalCookScore), 350);
-            return 0;
-          }
-          return prev - 1;
+  // === STAGE 3: INGREDIENT DROP CUTSCENE + 10-SECOND HEARTH FANNING ===
+  const cutsceneItems: CutsceneItem[] = useMemo(() => {
+    const fishCol = FISH_TIERS[plan.fishSpecies.tier].colorHex;
+    const items: CutsceneItem[] = [
+      {
+        id: 'fish',
+        label: plan.fishSpecies.nameKo,
+        colorHexStr: fishCol,
+        colorHexNum: parseInt(fishCol.replace('#', ''), 16),
+        kind: 'fish',
+      },
+    ];
+    plan.ingredientIds.forEach((id) => {
+      const ing = INGREDIENT_CATALOG.find((i) => i.id === id);
+      if (ing) {
+        items.push({
+          id: ing.id,
+          label: ing.nameKo,
+          colorHexStr: ing.colorHex,
+          colorHexNum: parseInt(ing.colorHex.replace('#', ''), 16),
+          kind: ing.category,
         });
       }
+    });
+    return items;
+  }, [plan]);
 
-      raf = requestAnimationFrame(loop);
+  const [cookPhase, setCookPhase] = useState<'cutscene' | 'fan'>('cutscene');
+  const [droppedCount, setDroppedCount] = useState(0);
+  const [fanCount, setFanCount] = useState(0);
+  const [fanTimeLeftMs, setFanTimeLeftMs] = useState(FAN_DURATION_MS);
+  const [fanFinished, setFanFinished] = useState(false);
+  const [fanPulse, setFanPulse] = useState(false);
+
+  const fanCountRef = useRef(0);
+  const fanCompletedRef = useRef(false);
+
+  // Initialize Stage 3 Cutscene
+  useEffect(() => {
+    if (stage !== 'cook') return;
+    setCookPhase('cutscene');
+    setDroppedCount(0);
+    setFanCount(0);
+    setFanTimeLeftMs(FAN_DURATION_MS);
+    setFanFinished(false);
+    setFanPulse(false);
+    fanCountRef.current = 0;
+    fanCompletedRef.current = false;
+    onHeatChangeRef.current(0.25);
+  }, [stage, plan]);
+
+  // Automatic sequential ingredient drop cutscene
+  useEffect(() => {
+    if (stage !== 'cook' || cookPhase !== 'cutscene') return;
+
+    const timers: number[] = [];
+    cutsceneItems.forEach((item, idx) => {
+      const t = window.setTimeout(() => {
+        soundEngine.playDropIngredient();
+        onPotDropRef.current(item.colorHexNum, item.kind);
+        setDroppedCount(idx + 1);
+      }, 380 + idx * 650);
+      timers.push(t);
+    });
+
+    const endDelay = 380 + cutsceneItems.length * 650 + 620;
+    const finishTimer = window.setTimeout(() => {
+      setCookPhase('fan');
+    }, endDelay);
+    timers.push(finishTimer);
+
+    return () => {
+      timers.forEach((id) => clearTimeout(id));
     };
+  }, [stage, cookPhase, cutsceneItems]);
 
-    raf = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(raf);
-  }, [stage, cookPhase, onHeatChange, onStageComplete]);
+  // 10-second countdown timer during Hearth Fanning
+  useEffect(() => {
+    if (stage !== 'cook' || cookPhase !== 'fan') return;
 
-  const handleStirDevotion = () => {
-    if (!stirPromptActive) return;
-    setStirPromptActive(false);
-    devotionRef.current = Math.min(35, devotionRef.current + 12);
-    setDevotionScore(devotionRef.current);
-    soundEngine.playStir();
-    onStageBurst('cook', 0xfef08a);
+    const endTime = performance.now() + FAN_DURATION_MS;
+    setFanTimeLeftMs(FAN_DURATION_MS);
+    fanCompletedRef.current = false;
+
+    const iv = window.setInterval(() => {
+      const left = Math.max(0, endTime - performance.now());
+      setFanTimeLeftMs(left);
+      if (left <= 0 && !fanCompletedRef.current) {
+        fanCompletedRef.current = true;
+        clearInterval(iv);
+        setFanFinished(true);
+        const finalScore = Math.min(
+          100,
+          Math.max(25, Math.round(25 + (fanCountRef.current / FAN_TARGET_FOR_100) * 75)),
+        );
+        window.setTimeout(() => {
+          onStageCompleteRef.current('cook', finalScore);
+        }, 550);
+      }
+    }, 40);
+
+    return () => clearInterval(iv);
+  }, [stage, cookPhase]);
+
+  const triggerFanAction = () => {
+    if (stage !== 'cook' || cookPhase !== 'fan' || fanCompletedRef.current) return;
+    const next = fanCountRef.current + 1;
+    fanCountRef.current = next;
+    setFanCount(next);
+    setFanPulse(true);
+    window.setTimeout(() => setFanPulse(false), 95);
+
+    soundEngine.playFireFan();
+    onFanStrokeRef.current();
+    onHeatChangeRef.current(Math.min(1, 0.25 + (next / FAN_TARGET_FOR_100) * 0.75));
   };
 
   useEffect(() => {
     if (stage !== 'cook') return;
     const onDown = (e: KeyboardEvent) => {
-      if (e.code === 'Space') {
+      if (cookPhase === 'fan' && (e.code === 'Space' || e.code === 'KeyE') && !e.repeat) {
         e.preventDefault();
-        if (cookPhase === 'drop') handleDropNext();
-        else {
-          if (!fanHeldRef.current) soundEngine.playFireFan();
-          fanHeldRef.current = true;
-        }
-      } else if (e.code === 'KeyE' && cookPhase === 'simmer') {
+        triggerFanAction();
+      } else if (cookPhase === 'cutscene' && e.code === 'Space' && !e.repeat) {
         e.preventDefault();
-        handleStirDevotion();
+        setCookPhase('fan');
       }
     };
-    const onUp = (e: KeyboardEvent) => {
-      if (e.code === 'Space') fanHeldRef.current = false;
-    };
-    const onBlur = () => {
-      fanHeldRef.current = false;
-    };
     window.addEventListener('keydown', onDown);
-    window.addEventListener('keyup', onUp);
-    window.addEventListener('blur', onBlur);
-    return () => {
-      window.removeEventListener('keydown', onDown);
-      window.removeEventListener('keyup', onUp);
-      window.removeEventListener('blur', onBlur);
-    };
+    return () => window.removeEventListener('keydown', onDown);
   });
 
   if (stage !== 'wash' && stage !== 'prep' && stage !== 'cook') return null;
+
+  const currentPerfectionPct = Math.min(
+    100,
+    Math.max(25, Math.round(25 + (fanCount / FAN_TARGET_FOR_100) * 75)),
+  );
+  const fanSecondsText = (fanTimeLeftMs / 1000).toFixed(1);
+  const fireTierText =
+    fanCount >= 45
+      ? '투발루 최고 화력! (100%)'
+      : fanCount >= 32
+        ? '황금빛 불꽃!'
+        : fanCount >= 18
+          ? '타오르는 숯불!'
+          : '불씨를 키우세요!';
 
   return (
     <div className="pointer-events-none fixed inset-x-0 bottom-5 z-30 flex justify-center px-4">
@@ -336,7 +394,7 @@ export const CookingMinigameHUD: React.FC<CookingMinigameHUDProps> = ({
             </span>
             <span className="text-slate-500">→</span>
             <span className={stage === 'cook' ? 'text-amber-300' : 'text-teal-300'}>
-              ③ 냄비 조리
+              ③ 투하 · 화덕 부채질
             </span>
           </div>
           <span className="rounded-lg bg-slate-900/90 px-2.5 py-1 text-xs font-bold text-cyan-200">
@@ -406,7 +464,6 @@ export const CookingMinigameHUD: React.FC<CookingMinigameHUDProps> = ({
             </div>
 
             <div className="relative mt-4 h-10 w-full overflow-hidden rounded-xl border border-white/20 bg-slate-900">
-              {/* Target Cut Zone */}
               <div
                 className="absolute top-0 bottom-0 bg-emerald-500/35 border-x border-emerald-300"
                 style={{ left: `${(targetCenters[cutIndex] ?? 50) - 10}%`, width: '20%' }}
@@ -415,7 +472,6 @@ export const CookingMinigameHUD: React.FC<CookingMinigameHUDProps> = ({
                 className="absolute top-0 bottom-0 w-1.5 -translate-x-1/2 bg-amber-300"
                 style={{ left: `${targetCenters[cutIndex] ?? 50}%` }}
               />
-              {/* Moving Knife Marker */}
               <div
                 className="absolute top-1 bottom-1 w-3 -translate-x-1/2 rounded-full bg-white shadow-lg"
                 style={{ left: `${bladePos}%` }}
@@ -437,93 +493,123 @@ export const CookingMinigameHUD: React.FC<CookingMinigameHUDProps> = ({
           </div>
         ) : null}
 
-        {/* === STAGE 3: COOK === */}
+        {/* === STAGE 3: CUTSCENE + 10s HEARTH FANNING === */}
         {stage === 'cook' ? (
           <div className="mt-4">
-            {cookPhase === 'drop' ? (
+            {cookPhase === 'cutscene' ? (
               <div>
-                <h3 className="font-display text-lg font-extrabold text-white">
-                  3단계 (준비): 냄비에 재료 넣기 ({droppedCount}/{potQueue.current.length})
-                </h3>
-                <p className="mt-1 text-xs text-cyan-200">
-                  다음 재료: <strong className="text-amber-300">{potQueue.current[droppedCount]?.label ?? '완료'}</strong>
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Sparkles className="h-4 w-4 text-amber-300" />
+                    <h3 className="font-display text-lg font-extrabold text-white">
+                      3단계 (컷씬): 선택한 재료를 냄비에 넣는 중...
+                    </h3>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setCookPhase('fan')}
+                    className="flex items-center gap-1 rounded-lg bg-slate-800 px-2.5 py-1 text-xs font-bold text-cyan-200 hover:bg-slate-700 cursor-pointer"
+                  >
+                    <SkipForward className="h-3.5 w-3.5" /> 바로 부채질
+                  </button>
+                </div>
+
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {cutsceneItems.map((item, idx) => {
+                    const dropped = idx < droppedCount;
+                    const droppingNow = idx === droppedCount;
+                    return (
+                      <div
+                        key={item.id}
+                        className={`flex items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-bold transition-all ${
+                          dropped
+                            ? 'border-emerald-400/50 bg-emerald-500/20 text-emerald-100'
+                            : droppingNow
+                              ? 'border-amber-300 bg-amber-400/25 text-amber-100 scale-105'
+                              : 'border-white/15 bg-slate-900/70 text-slate-400'
+                        }`}
+                      >
+                        <span
+                          className="h-2.5 w-2.5 rounded-full"
+                          style={{ backgroundColor: item.colorHexStr }}
+                        />
+                        <span>{item.label}</span>
+                        {dropped ? <Check className="h-3.5 w-3.5 text-emerald-300" /> : null}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-slate-800">
+                  <div
+                    className="h-full bg-gradient-to-r from-amber-400 to-emerald-400 transition-all duration-300"
+                    style={{
+                      width: `${Math.round((droppedCount / Math.max(1, cutsceneItems.length)) * 100)}%`,
+                    }}
+                  />
+                </div>
+                <p className="mt-2 text-center text-xs text-cyan-200">
+                  {droppedCount >= cutsceneItems.length
+                    ? '모든 재료 투하 완료! 곧 화덕 부채질이 시작됩니다...'
+                    : '투발루 전통 냄비에 신선한 재료들이 들어가고 있습니다!'}
                 </p>
-                <button
-                  type="button"
-                  onClick={handleDropNext}
-                  className="mt-3 min-h-[48px] w-full rounded-xl bg-gradient-to-r from-amber-400 to-orange-400 py-3 text-sm font-extrabold text-slate-950 hover:from-amber-300 hover:to-orange-300 active:scale-[0.98] cursor-pointer"
-                >
-                  냄비에 재료 투하! (터치 또는 Space)
-                </button>
               </div>
             ) : (
               <div>
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between gap-2">
                   <h3 className="font-display text-lg font-extrabold text-white">
-                    3단계 (조리): 불 조절 &amp; 정성 담기!
+                    3단계: 10초 안에 화덕에 부채질하세요!
                   </h3>
-                  <span className="tabular-nums text-sm font-black text-amber-300">
-                    {simmerTimeLeft}초 · 정성 +{devotionScore}
+                  <span
+                    className={`tabular-nums text-base font-black ${
+                      fanTimeLeftMs <= 3000 ? 'text-rose-300' : 'text-amber-300'
+                    }`}
+                  >
+                    {fanSecondsText}초
                   </span>
                 </div>
 
-                {/* Fire Heat Bar */}
-                <div className="relative mt-3 h-7 w-full overflow-hidden rounded-xl border border-white/15 bg-slate-900">
+                <div className="mt-2 flex items-center justify-between text-xs font-bold">
+                  <span className="flex items-center gap-1 text-orange-300">
+                    <Flame className="h-4 w-4" /> {fireTierText}
+                  </span>
+                  <span className="tabular-nums text-cyan-100">
+                    부채질 <strong className="text-amber-300">{fanCount}회</strong> · 완성도{' '}
+                    <strong className="text-emerald-300">{currentPerfectionPct}%</strong>
+                  </span>
+                </div>
+
+                {/* Fire & Perfection Bar */}
+                <div className="mt-2.5 h-5 w-full overflow-hidden rounded-xl border border-white/15 bg-slate-900">
                   <div
-                    className="absolute top-0 bottom-0 bg-emerald-500/35 border-x border-emerald-300"
-                    style={{ left: '42%', width: '36%' }}
-                  />
-                  <div
-                    className="h-full transition-colors"
+                    className="h-full transition-all duration-75"
                     style={{
-                      width: `${heat}%`,
-                      backgroundColor:
-                        heat >= 42 && heat <= 78 ? '#fbbf24' : heat > 78 ? '#ef4444' : '#38bdf8',
+                      width: `${currentPerfectionPct}%`,
+                      background: 'linear-gradient(90deg, #f97316, #fbbf24, #34d399)',
                     }}
                   />
                 </div>
-                <div className="mt-1 flex justify-between text-[11px] font-bold text-slate-300">
-                  <span>약불</span>
-                  <span className="text-emerald-300">최적 화력 (42%~78%)</span>
-                  <span>강불</span>
-                </div>
 
-                <div className="mt-3 flex gap-2.5">
-                  <button
-                    type="button"
-                    onPointerDown={(e) => {
-                      e.preventDefault();
-                      fanHeldRef.current = true;
-                      soundEngine.playFireFan();
-                    }}
-                    onPointerUp={() => {
-                      fanHeldRef.current = false;
-                    }}
-                    onPointerCancel={() => {
-                      fanHeldRef.current = false;
-                    }}
-                    onPointerLeave={() => {
-                      fanHeldRef.current = false;
-                    }}
-                    className="flex min-h-[48px] flex-1 touch-none items-center justify-center gap-1.5 rounded-xl bg-orange-500 py-2.5 text-sm font-extrabold text-slate-950 active:bg-orange-400 cursor-pointer"
-                  >
-                    <Flame className="h-4 w-4" /> 불 키우기 (꾹 누르기)
-                  </button>
-
-                  <button
-                    type="button"
-                    disabled={!stirPromptActive}
-                    onClick={handleStirDevotion}
-                    className={`flex min-h-[48px] items-center justify-center gap-1.5 rounded-xl px-4 py-2.5 text-sm font-extrabold transition-colors ${
-                      stirPromptActive
-                        ? 'bg-amber-300 text-slate-950 hover:bg-amber-200 cursor-pointer'
-                        : 'bg-slate-800 text-slate-500 cursor-not-allowed'
-                    }`}
-                  >
-                    <Sparkles className="h-4 w-4" />
-                    {stirPromptActive ? '정성 담기! (E)' : '보글보글...'}
-                  </button>
-                </div>
+                <button
+                  type="button"
+                  disabled={fanFinished}
+                  onPointerDown={(e) => {
+                    e.preventDefault();
+                    triggerFanAction();
+                  }}
+                  className={`mt-3 flex min-h-[56px] w-full touch-none items-center justify-center gap-2 rounded-2xl py-3.5 text-base font-black shadow-xl transition-transform cursor-pointer ${
+                    fanFinished
+                      ? 'bg-emerald-400 text-slate-950'
+                      : fanPulse
+                        ? 'scale-[0.97] bg-amber-300 text-slate-950'
+                        : 'bg-gradient-to-r from-orange-500 to-amber-400 text-slate-950 hover:from-orange-400 hover:to-amber-300'
+                  }`}
+                >
+                  <Wind className="h-5 w-5" />
+                  {fanFinished
+                    ? `조리 완성! (${fanCount}회 부채질 · ${currentPerfectionPct}점)`
+                    : '부채질하기! (연타 / 터치 / Space / E)'}
+                </button>
               </div>
             )}
           </div>
@@ -532,3 +618,4 @@ export const CookingMinigameHUD: React.FC<CookingMinigameHUDProps> = ({
     </div>
   );
 };
+

@@ -12,7 +12,7 @@ export type GameScreen = 'title' | 'playing';
 
 export type FishingPhase = 'idle' | 'casting' | 'waiting' | 'biting' | 'reeling' | 'caught';
 
-export type CookingStage = 'none' | 'wash' | 'prep' | 'cook' | 'judging' | 'result';
+export type CookingStage = 'none' | 'intro' | 'wash' | 'prep' | 'cook' | 'judging' | 'result';
 
 export interface TierMeta {
   id: FishTier;
@@ -26,6 +26,27 @@ export interface TierMeta {
   coinReward: number;
   dishQualityBonus: number;
   reelDifficulty: number;
+}
+
+export interface FishingDifficultySpec {
+  tier: FishTier;
+  biteWindowMs: number;
+  startProgress: number;
+  zoneHalfWidth: number;
+  zoneSpeedMin: number;
+  zoneSpeedMax: number;
+  directionFlipChance: number;
+  surgeIntervalSec: number;
+  surgeSpeedMult: number;
+  gainPerSec: number;
+  drainPerSec: number;
+  riseAccel: number;
+  fallAccel: number;
+  maxVel: number;
+  drag: number;
+  difficultyLabelKo: string;
+  stars: number;
+  biteHintKo: string;
 }
 
 export interface FishSpecies {

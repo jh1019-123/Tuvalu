@@ -18,6 +18,7 @@ import {
   VolumeX,
 } from 'lucide-react';
 import { soundEngine } from './audio/soundEngine';
+import { BattleIntroCutscene } from './components/BattleIntroCutscene';
 import { BattlePrepModal } from './components/BattlePrepModal';
 import { CookingMinigameHUD } from './components/CookingMinigameHUD';
 import { ErrorBoundary } from './components/ErrorBoundary';
@@ -31,6 +32,7 @@ import { ProfileRankModal } from './components/ProfileRankModal';
 import { SailingHUD } from './components/SailingHUD';
 import { TitleScreen } from './components/TitleScreen';
 import {
+  FISHING_DIFFICULTY_BY_TIER,
   FISH_CATALOG,
   FISH_TIERS,
   INGREDIENT_CATALOG,
@@ -57,6 +59,7 @@ import {
   CookingStage,
   CookingStageScores,
   FishSpecies,
+  FishTier,
   FishingPhase,
   GameScreen,
   IngredientItem,
@@ -188,6 +191,8 @@ function GameApp() {
 
   // Fishing State
   const [fishingPhase, setFishingPhase] = useState<FishingPhase>('idle');
+  const [hookedSpecies, setHookedSpecies] = useState<FishSpecies | null>(null);
+  const hookedSpeciesRef = useRef<FishSpecies | null>(null);
   const [lastCaught, setLastCaught] = useState<{
     species: FishSpecies;
     weightKg: number;
@@ -403,6 +408,8 @@ function GameApp() {
     if (biteTimerRef.current) clearTimeout(biteTimerRef.current);
     if (missTimerRef.current) clearTimeout(missTimerRef.current);
 
+    hookedSpeciesRef.current = null;
+    setHookedSpecies(null);
     worldRef.current?.setVirtualMove(0, 0);
     soundEngine.playCast();
     setFishingPhase('casting');
@@ -415,20 +422,31 @@ function GameApp() {
 
       const waitMs = 1300 + Math.random() * 1900;
       biteTimerRef.current = window.setTimeout(() => {
+        const nextFish = rollRandomFish();
+        const tier: FishTier = nextFish.tier;
+        const diff = FISHING_DIFFICULTY_BY_TIER[tier];
+        hookedSpeciesRef.current = nextFish;
+        setHookedSpecies(nextFish);
+
         soundEngine.playBiteAlert();
+        if (tier === 'epic' || tier === 'legendary' || tier === 'mythic') {
+          worldRef.current?.triggerShake(tier === 'mythic' ? 0.28 : tier === 'legendary' ? 0.2 : 0.12);
+        }
         setFishingPhase('biting');
-        worldRef.current?.setFishingPhase('biting');
+        worldRef.current?.setFishingPhase('biting', undefined, tier);
 
         missTimerRef.current = window.setTimeout(() => {
           setFishingPhase((curr) => {
             if (curr === 'biting') {
+              hookedSpeciesRef.current = null;
+              setHookedSpecies(null);
               worldRef.current?.setFishingPhase('idle');
-              showToast('앗! 물고기가 미끼만 먹고 도망갔습니다.');
+              showToast(`앗! ${FISH_TIERS[tier].labelKo} 등급 물고기가 미끼만 먹고 도망갔습니다.`);
               return 'idle';
             }
             return curr;
           });
-        }, 2800);
+        }, diff.biteWindowMs);
       }, waitMs);
     }, 350);
   }, [showToast]);
@@ -514,21 +532,25 @@ function GameApp() {
   const handleHookBite = useCallback(() => {
     if (missTimerRef.current) clearTimeout(missTimerRef.current);
     soundEngine.playReelTick();
+    const tier = hookedSpeciesRef.current?.tier ?? 'common';
     setFishingPhase('reeling');
-    worldRef.current?.setFishingPhase('reeling');
+    worldRef.current?.setFishingPhase('reeling', undefined, tier);
   }, []);
 
   const handleReelComplete = useCallback(
     (success: boolean) => {
+      const species = hookedSpeciesRef.current ?? rollRandomFish();
+      const tierMeta = FISH_TIERS[species.tier];
+
       if (!success) {
+        hookedSpeciesRef.current = null;
+        setHookedSpecies(null);
         setFishingPhase('idle');
         worldRef.current?.setFishingPhase('idle');
-        showToast('줄이 끊어졌습니다! 다시 낚싯대를 던져보세요.');
+        showToast(`${tierMeta.labelKo} 등급 물고기가 거세게 저항해 낚싯줄이 끊어졌습니다!`);
         return;
       }
 
-      const species = rollRandomFish();
-      const tierMeta = FISH_TIERS[species.tier];
       const weightKg = Number((0.6 + Math.random() * 4.5 * species.scaleFactor).toFixed(1));
       const coins = tierMeta.coinReward;
 
@@ -539,6 +561,8 @@ function GameApp() {
         caughtAt: Date.now(),
       };
 
+      hookedSpeciesRef.current = null;
+      setHookedSpecies(null);
       setFishInventory((prev) => [caughtEntry, ...prev]);
       setCaughtSpeciesIds((prev) => (prev.includes(species.id) ? prev : [...prev, species.id]));
       setFishDexRecords((prev) => {
@@ -576,6 +600,8 @@ function GameApp() {
   );
 
   const handleCloseCatch = useCallback(() => {
+    hookedSpeciesRef.current = null;
+    setHookedSpecies(null);
     setFishingPhase('idle');
     setLastCaught(null);
     worldRef.current?.setFishingPhase('idle');
@@ -642,10 +668,23 @@ function GameApp() {
     setStageScores({ wash: 0, prep: 0, cook: 0 });
     setVerdict(null);
     setRankPublishedThisBattle(false);
-    setCookingStage('wash');
-    worldRef.current?.setCookingStage('wash', plan.fishSpecies, 0.5, plan.ingredientIds, plan.rival);
+    setCookingStage('intro');
+    worldRef.current?.setCookingStage('intro', plan.fishSpecies, 0.5, plan.ingredientIds, plan.rival);
     soundEngine.playClick();
   }, []);
+
+  const handleIntroComplete = useCallback(() => {
+    if (!battlePlan) return;
+    setCookingStage('wash');
+    worldRef.current?.setCookingStage(
+      'wash',
+      battlePlan.fishSpecies,
+      0.5,
+      battlePlan.ingredientIds,
+      battlePlan.rival,
+    );
+    soundEngine.playClick();
+  }, [battlePlan]);
 
   const finalizeJudging = useCallback(
     (plan: BattlePlan, finalScores: CookingStageScores) => {
@@ -1249,11 +1288,21 @@ function GameApp() {
       {screen === 'playing' && cookingStage === 'none' ? (
         <FishingHUD
           phase={fishingPhase}
+          hookedTier={hookedSpecies?.tier ?? 'common'}
           lastCaught={lastCaught}
           onCast={startFishing}
           onHookBite={handleHookBite}
           onReelComplete={handleReelComplete}
           onCloseCatch={handleCloseCatch}
+        />
+      ) : null}
+
+      {/* Pre-Battle Ingredient Intro Cutscene */}
+      {battlePlan && cookingStage === 'intro' ? (
+        <BattleIntroCutscene
+          plan={battlePlan}
+          onTriggerItemDrop={(idx) => worldRef.current?.triggerIntroItemIntoPot(idx)}
+          onComplete={handleIntroComplete}
         />
       ) : null}
 
@@ -1264,6 +1313,8 @@ function GameApp() {
           plan={battlePlan}
           scores={stageScores}
           onStageBurst={(station, col) => worldRef.current?.triggerKitchenBurst(station, col)}
+          onPotDrop={(col, kind) => worldRef.current?.triggerPotDrop(col, kind)}
+          onFanStroke={() => worldRef.current?.triggerFanStroke()}
           onHeatChange={(h) => worldRef.current?.setHeatLevel(h)}
           onStageComplete={handleStageComplete}
         />

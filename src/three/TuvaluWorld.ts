@@ -9,6 +9,7 @@ import {
 import {
   CookingStage,
   FishSpecies,
+  FishTier,
   FishingPhase,
   IslandId,
   MapZone,
@@ -132,6 +133,16 @@ export class TuvaluWorld {
   private boardFishMesh: THREE.Group | null = null;
   private platePlayerItems: THREE.Object3D[] = [];
   private plateRivalItems: THREE.Object3D[] = [];
+  private potDropItems: { mesh: THREE.Object3D; t: number; startX: number; colorHex: number }[] = [];
+  private introShowcaseItems: {
+    group: THREE.Group;
+    basePos: THREE.Vector3;
+    colorHex: number;
+    state: 'hover' | 'dropping' | 'done';
+    t: number;
+  }[] = [];
+  private potDropTimer = 0;
+  private fanSwingTimer = 0;
 
   // Water shader uniform
   private waterUniforms = { uTime: { value: 0 } };
@@ -140,6 +151,8 @@ export class TuvaluWorld {
   private screenMode: 'title' | 'playing' = 'title';
   private zone: MapZone = 'fishing';
   private fishingPhase: FishingPhase = 'idle';
+  private hookedTier: FishTier = 'common';
+  private reelSplashTimer = 0;
   private cookingStage: CookingStage = 'none';
   private heatLevel = 0.5;
   private cameraLookCurrent = new THREE.Vector3(0, 1.4, 2);
@@ -853,9 +866,14 @@ export class TuvaluWorld {
     return FUNAFUTI_DOCK_BOAT_POS;
   }
 
-  public setFishingPhase(phase: FishingPhase, caughtSpecies?: FishSpecies) {
+  public setFishingPhase(phase: FishingPhase, caughtSpecies?: FishSpecies, hookedTier?: FishTier) {
     this.fishingPhase = phase;
+    if (hookedTier) {
+      this.hookedTier = hookedTier;
+    }
     if (phase === 'idle') {
+      this.hookedTier = 'common';
+      this.reelSplashTimer = 0;
       this.bobber.visible = false;
       this.fishingLine.visible = false;
       this.clearShowcaseFish();
@@ -873,6 +891,10 @@ export class TuvaluWorld {
       );
       if (phase === 'waiting') {
         this.spawnBurst(this.bobber.position, 0xe0f2fe, 10, 2.8);
+      } else if (phase === 'biting' && hookedTier) {
+        const tierCol = parseInt(FISH_TIERS[hookedTier].colorHex.replace('#', ''), 16);
+        const burstCount = hookedTier === 'mythic' ? 22 : hookedTier === 'legendary' ? 16 : hookedTier === 'epic' ? 12 : 8;
+        this.spawnBurst(this.bobber.position, tierCol, burstCount, 3.8);
       }
     } else if (phase === 'caught' && caughtSpecies) {
       this.bobber.visible = false;
@@ -914,25 +936,38 @@ export class TuvaluWorld {
     this.playerVy = 0;
     this.isGrounded = true;
 
-    if (stage === 'wash') {
+    if (stage === 'intro') {
+      this.battleOutcome = 'none';
+      this.resetActorPoses();
+      this.setCuttingBoardFish(null);
+      this.clearPlatedDishes();
+      this.player.root.position.set(3.4, 0.91, -10.3);
+      this.player.root.rotation.y = Math.PI;
+      this.buildIntroShowcase(species ?? FISH_CATALOG[0], playerIngredientIds);
+    } else if (stage === 'wash') {
+      this.clearIntroShowcase();
       this.battleOutcome = 'none';
       this.resetActorPoses();
       this.player.root.position.set(-3.4, 0.91, -10.7);
       this.player.root.rotation.y = Math.PI;
     } else if (stage === 'prep') {
+      this.clearIntroShowcase();
       this.player.root.position.set(0, 0.91, -10.7);
       this.player.root.rotation.y = Math.PI;
       this.setCuttingBoardFish(species ?? null);
     } else if (stage === 'cook') {
+      this.clearIntroShowcase();
       this.setCuttingBoardFish(null);
       this.player.root.position.set(3.4, 0.91, -10.7);
       this.player.root.rotation.y = Math.PI;
     } else if (stage === 'judging' || stage === 'result') {
+      this.clearIntroShowcase();
       this.setCuttingBoardFish(null);
       this.player.root.position.set(0.3, 0.91, -6.2);
       this.player.root.rotation.y = Math.PI;
       this.showPlatedDishes(species ?? FISH_CATALOG[0], playerIngredientIds, rival);
     } else {
+      this.clearIntroShowcase();
       this.battleOutcome = 'none';
       this.resetActorPoses();
       this.setCuttingBoardFish(null);
@@ -961,6 +996,157 @@ export class TuvaluWorld {
       pos.set(1.4, 2.1, -7.7);
     }
     this.spawnBurst(pos, colorHex, 10, 3.2);
+  }
+
+  public triggerPotDrop(colorHex: number, kind: 'fish' | 'meat' | 'vegetable' | 'salt' | 'spice' = 'spice') {
+    const startX = 3.4 + (Math.random() - 0.5) * 0.28;
+    const geom =
+      kind === 'fish'
+        ? new THREE.CapsuleGeometry(0.11, 0.26, 4, 8)
+        : kind === 'meat'
+          ? new THREE.BoxGeometry(0.22, 0.14, 0.18)
+          : kind === 'salt'
+            ? new THREE.OctahedronGeometry(0.14, 0)
+            : new THREE.SphereGeometry(0.15, 10, 10);
+    const mesh = new THREE.Mesh(
+      geom,
+      new THREE.MeshStandardMaterial({
+        color: colorHex,
+        emissive: colorHex,
+        emissiveIntensity: 0.25,
+        roughness: 0.35,
+      }),
+    );
+    mesh.position.set(startX, 3.45, -12.1);
+    this.scene.add(mesh);
+    this.potDropItems.push({ mesh, t: 0, startX, colorHex });
+    this.potDropTimer = 0.42;
+  }
+
+  public triggerFanStroke() {
+    this.fanSwingTimer = 0.24;
+    _vec3A.set(3.4, 1.65, -12.05);
+    this.spawnBurst(_vec3A, 0xf97316, 8, 3.5);
+  }
+
+  public triggerIntroItemIntoPot(index: number) {
+    const item = this.introShowcaseItems[index];
+    if (!item || item.state !== 'hover') return;
+    item.state = 'dropping';
+    item.t = 0;
+    this.potDropTimer = 0.42;
+  }
+
+  private clearIntroShowcase() {
+    for (const item of this.introShowcaseItems) {
+      this.scene.remove(item.group);
+      item.group.traverse((obj) => {
+        if ((obj as THREE.Mesh).isMesh) {
+          (obj as THREE.Mesh).geometry.dispose();
+          const m = (obj as THREE.Mesh).material;
+          if (Array.isArray(m)) m.forEach((mat) => mat.dispose());
+          else m.dispose();
+        }
+      });
+    }
+    this.introShowcaseItems = [];
+  }
+
+  private buildIntroShowcase(species: FishSpecies, ingredientIds: string[]) {
+    this.clearIntroShowcase();
+
+    const entries: { group: THREE.Group; colorHex: number }[] = [];
+
+    // 1. Selected Fish 3D mesh
+    const fishGroup = new THREE.Group();
+    const fishMesh = buildFishMesh(species);
+    fishMesh.scale.multiplyScalar(0.55);
+    fishGroup.add(fishMesh);
+    const fishCol = parseInt(FISH_TIERS[species.tier].colorHex.replace('#', ''), 16);
+    const halo = new THREE.Mesh(
+      new THREE.TorusGeometry(0.46, 0.03, 8, 24),
+      new THREE.MeshBasicMaterial({ color: fishCol, transparent: true, opacity: 0.7 }),
+    );
+    halo.rotation.x = Math.PI / 2;
+    halo.position.y = -0.22;
+    fishGroup.add(halo);
+    entries.push({ group: fishGroup, colorHex: fishCol });
+
+    // 2. Selected Ingredients 3D icons
+    ingredientIds.forEach((id) => {
+      const ing = INGREDIENT_CATALOG.find((i) => i.id === id);
+      if (!ing) return;
+      const colHex = parseInt(ing.colorHex.replace('#', ''), 16);
+      const g = new THREE.Group();
+      const mat = new THREE.MeshStandardMaterial({
+        color: colHex,
+        emissive: colHex,
+        emissiveIntensity: 0.25,
+        roughness: 0.32,
+      });
+
+      if (ing.category === 'meat') {
+        const cut = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.24, 0.34), mat);
+        g.add(cut);
+        const bone = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.06, 0.06, 0.18, 8),
+          new THREE.MeshStandardMaterial({ color: 0xfef3c7, roughness: 0.5 }),
+        );
+        bone.rotation.z = Math.PI / 2;
+        bone.position.set(0.24, 0.04, 0);
+        g.add(bone);
+      } else if (ing.category === 'vegetable') {
+        const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.24, 12, 12), mat);
+        bulb.scale.set(1, 0.88, 1);
+        g.add(bulb);
+        const leaf = new THREE.Mesh(
+          new THREE.ConeGeometry(0.14, 0.28, 6),
+          new THREE.MeshStandardMaterial({ color: 0x22c55e, roughness: 0.5 }),
+        );
+        leaf.position.y = 0.24;
+        g.add(leaf);
+      } else if (ing.category === 'salt') {
+        const crystal = new THREE.Mesh(new THREE.OctahedronGeometry(0.26, 0), mat);
+        g.add(crystal);
+      } else {
+        const pod = new THREE.Mesh(new THREE.ConeGeometry(0.16, 0.44, 10), mat);
+        pod.rotation.z = 0.35;
+        g.add(pod);
+        const cap = new THREE.Mesh(
+          new THREE.SphereGeometry(0.12, 8, 8),
+          new THREE.MeshStandardMaterial({ color: 0xfef08a, roughness: 0.4 }),
+        );
+        cap.position.set(-0.08, 0.2, 0);
+        g.add(cap);
+      }
+
+      const ring = new THREE.Mesh(
+        new THREE.TorusGeometry(0.36, 0.025, 8, 20),
+        new THREE.MeshBasicMaterial({ color: colHex, transparent: true, opacity: 0.65 }),
+      );
+      ring.rotation.x = Math.PI / 2;
+      ring.position.y = -0.24;
+      g.add(ring);
+
+      entries.push({ group: g, colorHex: colHex });
+    });
+
+    const total = entries.length;
+    const spacing = Math.min(1.05, 3.6 / Math.max(1, total - 1));
+    entries.forEach((entry, i) => {
+      const offsetX = total === 1 ? 0 : (i - (total - 1) / 2) * spacing;
+      const archY = 2.95 + Math.cos((offsetX / 2.2) * Math.PI * 0.5) * 0.32;
+      const pos = new THREE.Vector3(3.4 + offsetX, archY, -11.45);
+      entry.group.position.copy(pos);
+      this.scene.add(entry.group);
+      this.introShowcaseItems.push({
+        group: entry.group,
+        basePos: pos,
+        colorHex: entry.colorHex,
+        state: 'hover',
+        t: 0,
+      });
+    });
   }
 
   private setCuttingBoardFish(species: FishSpecies | null) {
@@ -1298,12 +1484,34 @@ export class TuvaluWorld {
     // Rich Character & NPC Animations
     this.updateCharacterAnimations(dt, moving);
 
-    // Bobber & fishing line animation
+    // Bobber & fishing line animation (intensity scales with hooked fish tier)
     if (this.bobber.visible && this.player.rodTip) {
-      const dip = this.fishingPhase === 'biting' ? Math.sin(this.elapsed * 22) * 0.16 - 0.14 : Math.sin(this.elapsed * 3.5) * 0.05;
+      const tierPower =
+        this.hookedTier === 'mythic'
+          ? 2.2
+          : this.hookedTier === 'legendary'
+            ? 1.8
+            : this.hookedTier === 'epic'
+              ? 1.45
+              : this.hookedTier === 'uncommon'
+                ? 1.15
+                : 1.0;
+      const dip =
+        this.fishingPhase === 'biting'
+          ? Math.sin(this.elapsed * 22 * tierPower) * (0.14 * tierPower) - 0.14
+          : Math.sin(this.elapsed * 3.5) * 0.05;
       this.bobber.position.y = 0.03 + dip;
       if (this.fishingPhase === 'reeling') {
-        this.bobber.position.x += Math.sin(this.elapsed * 14) * 1.4 * dt;
+        this.bobber.position.x += Math.sin(this.elapsed * 14 * tierPower) * 1.6 * tierPower * dt;
+        this.reelSplashTimer -= dt;
+        if (this.reelSplashTimer <= 0) {
+          this.reelSplashTimer = Math.max(0.18, 0.55 - tierPower * 0.16);
+          const splashCol =
+            this.hookedTier === 'mythic' || this.hookedTier === 'legendary'
+              ? parseInt(FISH_TIERS[this.hookedTier].colorHex.replace('#', ''), 16)
+              : 0xe0f2fe;
+          this.spawnBurst(this.bobber.position, splashCol, Math.round(4 * tierPower), 2.2 * tierPower);
+        }
       }
       this.player.rodTip.getWorldPosition(_vec3A);
       this.linePositions[0] = _vec3A.x;
@@ -1329,9 +1537,57 @@ export class TuvaluWorld {
     this.kitchen.frontWallGroup.visible = !showInterior;
 
     // Kitchen hearth ember & pot animation
-    const targetIntensity = this.cookingStage === 'cook' ? 1.2 + this.heatLevel * 3.8 : 1.8 + Math.sin(this.elapsed * 5) * 0.25;
+    const targetIntensity = this.cookingStage === 'cook' ? 1.2 + this.heatLevel * 4.4 : 1.8 + Math.sin(this.elapsed * 5) * 0.25;
     this.kitchen.hearthGlow.intensity = THREE.MathUtils.damp(this.kitchen.hearthGlow.intensity, targetIntensity, 8, dt);
-    this.kitchen.potLiquid.position.y = 0.54 + Math.sin(this.elapsed * (this.cookingStage === 'cook' ? 12 : 4)) * 0.018;
+    this.kitchen.potLiquid.position.y = 0.54 + Math.sin(this.elapsed * (this.cookingStage === 'cook' ? 12 + this.heatLevel * 6 : 4)) * 0.018;
+
+    // Pre-battle intro 3D fish & ingredient icons floating & diving into pot
+    for (let i = 0; i < this.introShowcaseItems.length; i++) {
+      const item = this.introShowcaseItems[i];
+      if (item.state === 'done') continue;
+      if (item.state === 'hover') {
+        item.group.position.y = item.basePos.y + Math.sin(this.elapsed * 3.2 + i * 0.9) * 0.1;
+        item.group.rotation.y += dt * 1.4;
+      } else if (item.state === 'dropping') {
+        item.t += dt * 1.95;
+        if (item.t >= 1) {
+          item.state = 'done';
+          item.group.visible = false;
+          _vec3A.set(3.4, 1.9, -12.1);
+          this.spawnBurst(_vec3A, item.colorHex, 16, 4.0);
+        } else {
+          const u = item.t;
+          const arcLift = Math.sin(u * Math.PI) * 0.7;
+          item.group.position.x = THREE.MathUtils.lerp(item.basePos.x, 3.4, u);
+          item.group.position.z = THREE.MathUtils.lerp(item.basePos.z, -12.1, u);
+          item.group.position.y = THREE.MathUtils.lerp(item.basePos.y, 1.65, u * u) + arcLift;
+          item.group.rotation.y += dt * 6;
+          item.group.scale.setScalar(1 - u * 0.45);
+        }
+      }
+    }
+
+    // Falling ingredients into the pot cutscene animation
+    for (let i = this.potDropItems.length - 1; i >= 0; i--) {
+      const item = this.potDropItems[i];
+      item.t += dt * 2.15;
+      if (item.t >= 1) {
+        _vec3A.set(3.4, 1.9, -12.1);
+        this.spawnBurst(_vec3A, item.colorHex, 14, 3.8);
+        this.scene.remove(item.mesh);
+        if ((item.mesh as THREE.Mesh).isMesh) {
+          (item.mesh as THREE.Mesh).geometry.dispose();
+          ((item.mesh as THREE.Mesh).material as THREE.Material).dispose();
+        }
+        this.potDropItems.splice(i, 1);
+      } else {
+        const dropEase = item.t * item.t;
+        item.mesh.position.x = THREE.MathUtils.lerp(item.startX, 3.4, item.t);
+        item.mesh.position.y = THREE.MathUtils.lerp(3.45, 1.68, dropEase);
+        item.mesh.rotation.x += dt * 7;
+        item.mesh.rotation.z += dt * 5;
+      }
+    }
 
     // Proximity station detection
     this.detectNearbyStation();
@@ -1460,13 +1716,31 @@ export class TuvaluWorld {
       this.player.rightArm.rotation.x = -1.35 + Math.sin(this.elapsed * 20) * 0.35;
       this.player.leftArm.rotation.x = -0.45;
     } else if (this.fishingPhase === 'reeling' || this.fishingPhase === 'biting') {
-      this.player.leftLeg.rotation.x = 0;
-      this.player.rightLeg.rotation.x = 0;
-      this.player.rightArm.rotation.x = -0.65 + Math.sin(this.elapsed * 18) * 0.22;
-      this.player.leftArm.rotation.x = -0.35;
+      const tierForce =
+        this.hookedTier === 'mythic'
+          ? 1.85
+          : this.hookedTier === 'legendary'
+            ? 1.55
+            : this.hookedTier === 'epic'
+              ? 1.3
+              : 1.0;
+      this.player.leftLeg.rotation.x = -0.18 * tierForce;
+      this.player.rightLeg.rotation.x = 0.18 * tierForce;
+      this.player.rightArm.rotation.x = -0.65 - 0.18 * tierForce + Math.sin(this.elapsed * 18 * tierForce) * 0.24;
+      this.player.leftArm.rotation.x = -0.45 - 0.12 * tierForce;
     } else if (this.fishingPhase === 'caught') {
       this.player.leftArm.rotation.x = -2.1 + Math.sin(this.elapsed * 6) * 0.15;
       this.player.rightArm.rotation.x = -2.1 + Math.sin(this.elapsed * 6) * 0.15;
+    } else if (this.cookingStage === 'intro') {
+      if (this.potDropTimer > 0) {
+        this.potDropTimer = Math.max(0, this.potDropTimer - dt);
+        const p = 1 - this.potDropTimer / 0.42;
+        this.player.rightArm.rotation.x = -1.7 + Math.sin(p * Math.PI) * 0.65;
+        this.player.leftArm.rotation.x = -0.8;
+      } else {
+        this.player.leftArm.rotation.x = -0.5 + Math.sin(this.elapsed * 3.5) * 0.12;
+        this.player.rightArm.rotation.x = -0.5 - Math.sin(this.elapsed * 3.5) * 0.12;
+      }
     } else if (this.cookingStage === 'wash') {
       this.player.leftArm.rotation.x = -0.65 + Math.sin(this.elapsed * 13) * 0.28;
       this.player.rightArm.rotation.x = -0.65 - Math.sin(this.elapsed * 13) * 0.28;
@@ -1474,8 +1748,21 @@ export class TuvaluWorld {
       this.player.rightArm.rotation.x = -0.75 + Math.abs(Math.sin(this.elapsed * 11)) * 0.55;
       this.player.leftArm.rotation.x = -0.45;
     } else if (this.cookingStage === 'cook') {
-      this.player.leftArm.rotation.x = -0.7 + Math.sin(this.elapsed * 8) * 0.25;
-      this.player.rightArm.rotation.x = -0.7 + Math.cos(this.elapsed * 8) * 0.25;
+      if (this.potDropTimer > 0) {
+        this.potDropTimer = Math.max(0, this.potDropTimer - dt);
+        const p = 1 - this.potDropTimer / 0.42;
+        this.player.rightArm.rotation.x = -1.6 + Math.sin(p * Math.PI) * 0.7;
+        this.player.leftArm.rotation.x = -0.65;
+      } else if (this.fanSwingTimer > 0) {
+        this.fanSwingTimer = Math.max(0, this.fanSwingTimer - dt);
+        const f = Math.sin((this.fanSwingTimer / 0.24) * Math.PI * 2);
+        this.player.rightArm.rotation.x = -1.05 + f * 0.75;
+        this.player.rightArm.rotation.z = -0.35 + f * 0.35;
+        this.player.leftArm.rotation.x = -0.55;
+      } else {
+        this.player.leftArm.rotation.x = -0.6 + Math.sin(this.elapsed * 6) * 0.16;
+        this.player.rightArm.rotation.x = -0.6 + Math.cos(this.elapsed * 6) * 0.16;
+      }
     } else if (this.zone === 'sailing') {
       // Balanced paddling / steering posture in boat
       this.player.leftLeg.rotation.x = -0.45;
@@ -1788,6 +2075,9 @@ export class TuvaluWorld {
       const ang = this.elapsed * 0.16;
       _camTargetPos.set(Math.sin(ang) * 21, 10.2, 6 + Math.cos(ang) * 16);
       _camTargetLook.set(0, 1.8, -2.5);
+    } else if (this.cookingStage === 'intro') {
+      _camTargetPos.set(3.4, 3.85, -7.8);
+      _camTargetLook.set(3.4, 2.25, -11.9);
     } else if (this.cookingStage === 'wash') {
       _camTargetPos.set(-3.4, 3.8, -8.5);
       _camTargetLook.set(-3.4, 1.5, -12.1);
