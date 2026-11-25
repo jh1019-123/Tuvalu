@@ -12,7 +12,15 @@ export type GameScreen = 'title' | 'playing';
 
 export type FishingPhase = 'idle' | 'casting' | 'waiting' | 'biting' | 'reeling' | 'caught';
 
-export type CookingStage = 'none' | 'intro' | 'wash' | 'prep' | 'cook' | 'judging' | 'result';
+export type CookingStage =
+  | 'none'
+  | 'intro'
+  | 'wash'
+  | 'prep'
+  | 'cook'
+  | 'waiting_opponent'
+  | 'judging'
+  | 'result';
 
 export interface TierMeta {
   id: FishTier;
@@ -171,4 +179,45 @@ export interface LeaderboardEntryData {
   bestDishScore: number;
   rarestFishTier: FishTier | 'none';
   isPublic: boolean;
+}
+
+export type RealtimeRoomStatus = 'waiting' | 'prep' | 'playing' | 'finished' | 'cancelled';
+
+export type RealtimePlayerStage = 'idle' | 'intro' | 'wash' | 'prep' | 'cook' | 'done';
+
+export interface BattlePlayerSlot {
+  uid: string;
+  displayName: string;
+  chefTitle: string;
+  wins: number;
+  losses: number;
+  bestDishScore: number;
+  rarestFishTier: FishTier | 'none';
+  ready: boolean;
+  fishSpeciesId: string;
+  fishWeightKg: number;
+  ingredientIds: string[];
+  stage: RealtimePlayerStage;
+  washScore: number;
+  prepScore: number;
+  cookScore: number;
+  perfectionScore: number;
+  palateScore: number;
+  totalScore: number;
+  dishNameKo: string;
+}
+
+export interface BattleRoomData {
+  roomId: string;
+  status: RealtimeRoomStatus;
+  isMatchmaking: boolean;
+  judgeId: string;
+  hostUid: string;
+  guestUid: string;
+  host: BattlePlayerSlot;
+  guest: BattlePlayerSlot;
+  winnerUid: string;
+  createdAtMs: number;
+  startedAtMs: number;
+  updatedAtMs: number;
 }

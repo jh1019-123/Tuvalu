@@ -27,6 +27,10 @@ service cloud.firestore {
       return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
+    function isValidRoomCode(id) {
+      return id is string && id.size() == 6 && id.matches('^[A-Z0-9]{6}$');
+    }
+
     function isOwner(userId) {
       return isSignedIn() && request.auth.uid == userId;
     }
@@ -37,6 +41,18 @@ service cloud.firestore {
 
     function isValidTier(tier) {
       return tier is string && tier in ['none', 'common', 'uncommon', 'epic', 'legendary', 'mythic'];
+    }
+
+    function isValidBattleStage(st) {
+      return st is string && st in ['idle', 'intro', 'wash', 'prep', 'cook', 'done'];
+    }
+
+    function isValidIngredientList(list) {
+      return list is list
+        && list.size() <= 3
+        && (list.size() == 0 || (list[0] is string && list[0].size() >= 1 && list[0].size() <= 60))
+        && (list.size() <= 1 || (list[1] is string && list[1].size() >= 1 && list[1].size() <= 60))
+        && (list.size() <= 2 || (list[2] is string && list[2].size() >= 1 && list[2].size() <= 60));
     }
 
     // --- Validation Blueprints ---
@@ -125,6 +141,118 @@ service cloud.firestore {
       && data.updatedAt is timestamp;
     }
 
+    function isValidBattleSlot(slot, requireUid) {
+      return slot is map
+        && slot.keys().hasAll([
+          'uid',
+          'displayName',
+          'chefTitle',
+          'wins',
+          'losses',
+          'bestDishScore',
+          'rarestFishTier',
+          'ready',
+          'fishSpeciesId',
+          'fishWeightKg',
+          'ingredientIds',
+          'stage',
+          'washScore',
+          'prepScore',
+          'cookScore',
+          'perfectionScore',
+          'palateScore',
+          'totalScore',
+          'dishNameKo'
+        ])
+        && slot.keys().hasOnly([
+          'uid',
+          'displayName',
+          'chefTitle',
+          'wins',
+          'losses',
+          'bestDishScore',
+          'rarestFishTier',
+          'ready',
+          'fishSpeciesId',
+          'fishWeightKg',
+          'ingredientIds',
+          'stage',
+          'washScore',
+          'prepScore',
+          'cookScore',
+          'perfectionScore',
+          'palateScore',
+          'totalScore',
+          'dishNameKo'
+        ])
+        && slot.uid is string
+        && (requireUid ? isValidId(slot.uid) : slot.uid.size() <= 128)
+        && slot.displayName is string && slot.displayName.size() <= 40
+        && slot.chefTitle is string && slot.chefTitle.size() <= 40
+        && slot.wins is int && slot.wins >= 0 && slot.wins <= 100000
+        && slot.losses is int && slot.losses >= 0 && slot.losses <= 100000
+        && slot.bestDishScore is int && slot.bestDishScore >= 0 && slot.bestDishScore <= 1000
+        && isValidTier(slot.rarestFishTier)
+        && slot.ready is bool
+        && slot.fishSpeciesId is string && slot.fishSpeciesId.size() <= 60
+        && (slot.fishWeightKg is int || slot.fishWeightKg is float)
+        && slot.fishWeightKg >= 0 && slot.fishWeightKg <= 500
+        && isValidIngredientList(slot.ingredientIds)
+        && isValidBattleStage(slot.stage)
+        && slot.washScore is int && slot.washScore >= 0 && slot.washScore <= 100
+        && slot.prepScore is int && slot.prepScore >= 0 && slot.prepScore <= 100
+        && slot.cookScore is int && slot.cookScore >= 0 && slot.cookScore <= 100
+        && slot.perfectionScore is int && slot.perfectionScore >= 0 && slot.perfectionScore <= 100
+        && slot.palateScore is int && slot.palateScore >= 0 && slot.palateScore <= 100
+        && slot.totalScore is int && slot.totalScore >= 0 && slot.totalScore <= 200
+        && slot.dishNameKo is string && slot.dishNameKo.size() <= 80;
+    }
+
+    function isValidBattleRoom(data) {
+      return data.keys().hasAll([
+        'roomId',
+        'status',
+        'isMatchmaking',
+        'judgeId',
+        'hostUid',
+        'guestUid',
+        'host',
+        'guest',
+        'winnerUid',
+        'createdAt',
+        'startedAt',
+        'updatedAt'
+      ]) && data.keys().hasOnly([
+        'roomId',
+        'status',
+        'isMatchmaking',
+        'judgeId',
+        'hostUid',
+        'guestUid',
+        'host',
+        'guest',
+        'winnerUid',
+        'createdAt',
+        'startedAt',
+        'updatedAt'
+      ])
+      && isValidRoomCode(data.roomId)
+      && data.status is string && data.status in ['waiting', 'prep', 'playing', 'finished', 'cancelled']
+      && data.isMatchmaking is bool
+      && data.judgeId is string && data.judgeId.size() >= 1 && data.judgeId.size() <= 40
+      && isValidId(data.hostUid)
+      && data.guestUid is string && data.guestUid.size() <= 128
+      && (data.guestUid == '' || isValidId(data.guestUid))
+      && isValidBattleSlot(data.host, true)
+      && data.host.uid == data.hostUid
+      && isValidBattleSlot(data.guest, data.guestUid != '')
+      && data.guest.uid == data.guestUid
+      && data.winnerUid is string && data.winnerUid.size() <= 128
+      && data.createdAt is timestamp
+      && data.startedAt is timestamp
+      && data.updatedAt is timestamp;
+    }
+
     // --- Collection: /users/{userId} (Private Profile) ---
     match /users/{userId} {
       allow get: if isValidId(userId) && isOwner(userId);
@@ -197,6 +325,211 @@ service cloud.firestore {
         ]);
 
       allow delete: if isVerifiedOwner(userId) && isValidId(userId);
+    }
+
+    // --- Collection: /battleRooms/{roomId} (Real-Time 1v1 Cooking Battle Rooms) ---
+    match /battleRooms/{roomId} {
+      allow get: if isValidRoomCode(roomId)
+        && isVerified()
+        && (
+          resource == null
+          || existing().hostUid == request.auth.uid
+          || existing().guestUid == request.auth.uid
+          || existing().status == 'waiting'
+        );
+
+      allow list: if isVerified()
+        && existing().status == 'waiting'
+        && existing().isMatchmaking == true
+        && existing().guestUid == '';
+
+      allow create: if isVerified()
+        && isValidRoomCode(roomId)
+        && isValidBattleRoom(incoming())
+        && incoming().roomId == roomId
+        && incoming().hostUid == request.auth.uid
+        && incoming().guestUid == ''
+        && incoming().status == 'waiting'
+        && incoming().winnerUid == ''
+        && incoming().host.ready == false
+        && incoming().host.stage == 'idle'
+        && incoming().createdAt == request.time
+        && incoming().startedAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isVerified()
+        && isValidRoomCode(roomId)
+        && isValidBattleRoom(incoming())
+        && !(existing().status in ['finished', 'cancelled'])
+        && incoming().roomId == existing().roomId
+        && incoming().isMatchmaking == existing().isMatchmaking
+        && incoming().judgeId == existing().judgeId
+        && incoming().hostUid == existing().hostUid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          // Action: Guest joins a waiting room
+          (
+            existing().status == 'waiting'
+            && existing().guestUid == ''
+            && request.auth.uid != existing().hostUid
+            && incoming().guestUid == request.auth.uid
+            && incoming().status == 'prep'
+            && incoming().guest.ready == false
+            && incoming().guest.stage == 'idle'
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'guestUid',
+              'guest',
+              'status',
+              'updatedAt'
+            ])
+          )
+          ||
+          // Action: Host updates prep / stage / scores / finish / cancel
+          (
+            request.auth.uid == existing().hostUid
+            && incoming().guestUid == existing().guestUid
+            && (
+              (
+                existing().status == 'waiting'
+                && incoming().status in ['waiting', 'cancelled']
+                && incoming().startedAt == existing().startedAt
+                && incoming().winnerUid == ''
+              )
+              || (
+                existing().status == 'prep'
+                && incoming().status == 'prep'
+                && incoming().startedAt == existing().startedAt
+                && incoming().winnerUid == ''
+              )
+              || (
+                existing().status == 'prep'
+                && incoming().status == 'playing'
+                && incoming().host.ready == true
+                && existing().guest.ready == true
+                && incoming().startedAt == request.time
+                && incoming().winnerUid == ''
+              )
+              || (
+                existing().status == 'prep'
+                && incoming().status == 'cancelled'
+                && incoming().startedAt == existing().startedAt
+                && incoming().winnerUid == ''
+              )
+              || (
+                existing().status == 'playing'
+                && incoming().status == 'playing'
+                && incoming().startedAt == existing().startedAt
+                && incoming().winnerUid == ''
+              )
+              || (
+                existing().status == 'playing'
+                && incoming().status == 'finished'
+                && incoming().host.stage == 'done'
+                && incoming().startedAt == existing().startedAt
+                && (
+                  (
+                    existing().guest.stage == 'done'
+                    && (
+                      (incoming().host.totalScore > existing().guest.totalScore && incoming().winnerUid == existing().hostUid)
+                      || (incoming().host.totalScore < existing().guest.totalScore && incoming().winnerUid == existing().guestUid)
+                      || (incoming().host.totalScore == existing().guest.totalScore && incoming().winnerUid == 'draw')
+                    )
+                  )
+                  || (
+                    existing().guest.stage != 'done'
+                    && request.time > existing().updatedAt + duration.value(25, 's')
+                    && incoming().winnerUid == existing().hostUid
+                  )
+                )
+              )
+              || (
+                existing().status == 'playing'
+                && incoming().status == 'cancelled'
+                && incoming().startedAt == existing().startedAt
+                && incoming().winnerUid == ''
+              )
+            )
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'host',
+              'status',
+              'startedAt',
+              'winnerUid',
+              'updatedAt'
+            ])
+          )
+          ||
+          // Action: Guest updates prep / stage / scores / finish / cancel
+          (
+            existing().guestUid != ''
+            && request.auth.uid == existing().guestUid
+            && incoming().guestUid == existing().guestUid
+            && (
+              (
+                existing().status == 'prep'
+                && incoming().status == 'prep'
+                && incoming().startedAt == existing().startedAt
+                && incoming().winnerUid == ''
+              )
+              || (
+                existing().status == 'prep'
+                && incoming().status == 'playing'
+                && incoming().guest.ready == true
+                && existing().host.ready == true
+                && incoming().startedAt == request.time
+                && incoming().winnerUid == ''
+              )
+              || (
+                existing().status == 'prep'
+                && incoming().status == 'cancelled'
+                && incoming().startedAt == existing().startedAt
+                && incoming().winnerUid == ''
+              )
+              || (
+                existing().status == 'playing'
+                && incoming().status == 'playing'
+                && incoming().startedAt == existing().startedAt
+                && incoming().winnerUid == ''
+              )
+              || (
+                existing().status == 'playing'
+                && incoming().status == 'finished'
+                && incoming().guest.stage == 'done'
+                && incoming().startedAt == existing().startedAt
+                && (
+                  (
+                    existing().host.stage == 'done'
+                    && (
+                      (incoming().guest.totalScore > existing().host.totalScore && incoming().winnerUid == existing().guestUid)
+                      || (incoming().guest.totalScore < existing().host.totalScore && incoming().winnerUid == existing().hostUid)
+                      || (incoming().guest.totalScore == existing().host.totalScore && incoming().winnerUid == 'draw')
+                    )
+                  )
+                  || (
+                    existing().host.stage != 'done'
+                    && request.time > existing().updatedAt + duration.value(25, 's')
+                    && incoming().winnerUid == existing().guestUid
+                  )
+                )
+              )
+              || (
+                existing().status == 'playing'
+                && incoming().status == 'cancelled'
+                && incoming().startedAt == existing().startedAt
+                && incoming().winnerUid == ''
+              )
+            )
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'guest',
+              'status',
+              'startedAt',
+              'winnerUid',
+              'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if false;
     }
   }
 }

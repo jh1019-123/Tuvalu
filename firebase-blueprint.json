@@ -138,6 +138,200 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "BattlePlayerSlot": {
+      "title": "BattlePlayerSlot",
+      "description": "Real-time participant profile, dish selection, and live cooking progress inside a battle room (no PII).",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "Player Auth UID or empty string while slot is unoccupied."
+        },
+        "displayName": {
+          "type": "string",
+          "maxLength": 40,
+          "description": "Player chef nickname."
+        },
+        "chefTitle": {
+          "type": "string",
+          "maxLength": 40,
+          "description": "Earned Tuvalu culinary rank title."
+        },
+        "wins": {
+          "type": "integer",
+          "description": "Player victory count."
+        },
+        "losses": {
+          "type": "integer",
+          "description": "Player loss count."
+        },
+        "bestDishScore": {
+          "type": "integer",
+          "description": "Player best dish score."
+        },
+        "rarestFishTier": {
+          "type": "string",
+          "enum": ["none", "common", "uncommon", "epic", "legendary", "mythic"],
+          "description": "Highest rarity fish caught by player."
+        },
+        "ready": {
+          "type": "boolean",
+          "description": "Whether player locked in ingredients and is ready to cook."
+        },
+        "fishSpeciesId": {
+          "type": "string",
+          "maxLength": 60,
+          "description": "Selected fish species ID."
+        },
+        "fishWeightKg": {
+          "type": "number",
+          "description": "Selected fish weight in kilograms."
+        },
+        "ingredientIds": {
+          "type": "array",
+          "description": "Up to 3 selected ingredient IDs."
+        },
+        "stage": {
+          "type": "string",
+          "enum": ["idle", "intro", "wash", "prep", "cook", "done"],
+          "description": "Current cooking battle stage."
+        },
+        "washScore": {
+          "type": "integer",
+          "description": "Stage 1 score (0-100)."
+        },
+        "prepScore": {
+          "type": "integer",
+          "description": "Stage 2 score (0-100)."
+        },
+        "cookScore": {
+          "type": "integer",
+          "description": "Stage 3 score (0-100)."
+        },
+        "perfectionScore": {
+          "type": "integer",
+          "description": "Final dish perfection score (0-100)."
+        },
+        "palateScore": {
+          "type": "integer",
+          "description": "Final judge palate match score (0-100)."
+        },
+        "totalScore": {
+          "type": "integer",
+          "description": "Final total score (0-200)."
+        },
+        "dishNameKo": {
+          "type": "string",
+          "maxLength": 80,
+          "description": "Generated Korean dish name."
+        }
+      },
+      "required": [
+        "uid",
+        "displayName",
+        "chefTitle",
+        "wins",
+        "losses",
+        "bestDishScore",
+        "rarestFishTier",
+        "ready",
+        "fishSpeciesId",
+        "fishWeightKg",
+        "ingredientIds",
+        "stage",
+        "washScore",
+        "prepScore",
+        "cookScore",
+        "perfectionScore",
+        "palateScore",
+        "totalScore",
+        "dishNameKo"
+      ]
+    },
+    "BattleRoom": {
+      "title": "BattleRoom",
+      "description": "Real-time 1v1 Tuvalu cooking battle room keyed by a 6-character room code.",
+      "type": "object",
+      "properties": {
+        "roomId": {
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 6,
+          "pattern": "^[A-Z0-9]{6}$",
+          "description": "6-character uppercase room code matching the document ID."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["waiting", "prep", "playing", "finished", "cancelled"],
+          "description": "Lifecycle status of the real-time battle room."
+        },
+        "isMatchmaking": {
+          "type": "boolean",
+          "description": "Whether the room is open to random matchmaking."
+        },
+        "judgeId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40,
+          "description": "Shared Tuvalu judge ID for this battle."
+        },
+        "hostUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the room host."
+        },
+        "guestUid": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "Firebase Auth UID of the joining opponent, or empty string while waiting."
+        },
+        "host": {
+          "$ref": "#/entities/BattlePlayerSlot",
+          "description": "Host player profile, dish choice, and live progress."
+        },
+        "guest": {
+          "$ref": "#/entities/BattlePlayerSlot",
+          "description": "Guest player profile, dish choice, and live progress."
+        },
+        "winnerUid": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "Winning player UID, 'draw', or empty string until finished."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when room was created."
+        },
+        "startedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when simultaneous cooking started."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of latest room update."
+        }
+      },
+      "required": [
+        "roomId",
+        "status",
+        "isMatchmaking",
+        "judgeId",
+        "hostUid",
+        "guestUid",
+        "host",
+        "guest",
+        "winnerUid",
+        "createdAt",
+        "startedAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -148,6 +342,10 @@
     "/leaderboard/{userId}": {
       "schema": { "$ref": "#/entities/LeaderboardEntry" },
       "description": "Public Tuvalu Chef ranking entries containing published win counts and no PII."
+    },
+    "/battleRooms/{roomId}": {
+      "schema": { "$ref": "#/entities/BattleRoom" },
+      "description": "Real-time 1v1 cooking battle rooms for room-code and random matchmaking."
     }
   }
 }

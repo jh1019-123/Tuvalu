@@ -2,10 +2,15 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Beef, Check, Flame, Gem, Leaf, SkipForward, Sparkles, Swords } from 'lucide-react';
 import { soundEngine } from '../audio/soundEngine';
 import { FISH_TIERS, FLAVOR_LABELS, INGREDIENT_CATALOG } from '../data/tuvaluData';
-import { BattlePlan, IngredientCategory } from '../types/game';
+import { BattlePlan, BattlePlayerSlot, IngredientCategory } from '../types/game';
 
 interface BattleIntroCutsceneProps {
   plan: BattlePlan;
+  realtimePlayers?: {
+    self: BattlePlayerSlot;
+    opponent: BattlePlayerSlot;
+    roomCode: string;
+  };
   onTriggerItemDrop: (index: number) => void;
   onComplete: () => void;
 }
@@ -36,6 +41,7 @@ function renderKindIcon(kind: 'fish' | IngredientCategory, colorHex: string) {
 
 export const BattleIntroCutscene: React.FC<BattleIntroCutsceneProps> = ({
   plan,
+  realtimePlayers,
   onTriggerItemDrop,
   onComplete,
 }) => {
@@ -129,30 +135,95 @@ export const BattleIntroCutscene: React.FC<BattleIntroCutsceneProps> = ({
   return (
     <div className="pointer-events-none fixed inset-0 z-30 flex flex-col justify-between p-4">
       {/* Top VS & Judge Banner (leaves center 3D pot & flying icons unobstructed) */}
-      <div className="mx-auto flex w-full max-w-2xl flex-wrap items-center justify-between gap-3 rounded-2xl border border-amber-300/45 bg-[#072633]/92 px-5 py-3 shadow-2xl">
-        <div className="flex items-center gap-2.5">
-          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-amber-400/20 text-amber-300">
-            <Swords className="h-5 w-5" />
+      {realtimePlayers ? (
+        <div className="mx-auto w-full max-w-3xl rounded-2xl border border-amber-300/45 bg-[#072633]/94 px-4 py-3 shadow-2xl">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-2 text-[11px]">
+            <span className="font-extrabold text-amber-300">
+              실시간 1:1 요리 대결 개시 · 방 {realtimePlayers.roomCode}
+            </span>
+            <div className="flex items-center gap-1.5">
+              <span className="font-bold text-cyan-200">{plan.judge.nameKo} 선호:</span>
+              {plan.judge.preferredFlavors.map((f) => (
+                <span
+                  key={f}
+                  className="rounded bg-slate-900/90 px-1.5 py-0.5 text-[10px] font-bold text-teal-200 border border-white/10"
+                >
+                  {FLAVOR_LABELS[f].ko}
+                </span>
+              ))}
+            </div>
           </div>
-          <div>
-            <div className="text-[11px] font-extrabold text-amber-300">투발루 요리 대결 개시!</div>
-            <div className="text-sm font-black text-white">
-              나 <span className="text-amber-300">VS</span> {plan.rival.nameKo}
+
+          <div className="mt-2.5 grid grid-cols-11 items-center gap-2">
+            {/* Self Profile */}
+            <div className="col-span-5 rounded-xl border border-cyan-300/40 bg-cyan-500/10 px-3 py-2">
+              <div className="flex items-center justify-between gap-1">
+                <span className="rounded bg-cyan-400/25 px-1.5 py-0.5 text-[10px] font-extrabold text-cyan-200">
+                  나
+                </span>
+                <span className="text-[10px] font-bold text-amber-300 tabular-nums">
+                  {realtimePlayers.self.wins}승 {realtimePlayers.self.losses}패
+                </span>
+              </div>
+              <div className="mt-1 truncate text-sm font-black text-white">
+                {realtimePlayers.self.displayName}
+              </div>
+              <div className="flex items-center justify-between text-[10px] text-teal-200">
+                <span className="truncate">{realtimePlayers.self.chefTitle}</span>
+                <span className="tabular-nums font-bold">최고 {realtimePlayers.self.bestDishScore}점</span>
+              </div>
+            </div>
+
+            <div className="col-span-1 text-center font-display text-base font-black text-amber-300">
+              VS
+            </div>
+
+            {/* Opponent Profile */}
+            <div className="col-span-5 rounded-xl border border-rose-400/40 bg-rose-500/10 px-3 py-2 text-right">
+              <div className="flex items-center justify-between gap-1">
+                <span className="text-[10px] font-bold text-amber-300 tabular-nums">
+                  {realtimePlayers.opponent.wins}승 {realtimePlayers.opponent.losses}패
+                </span>
+                <span className="rounded bg-rose-500/25 px-1.5 py-0.5 text-[10px] font-extrabold text-rose-200">
+                  상대
+                </span>
+              </div>
+              <div className="mt-1 truncate text-sm font-black text-white">
+                {realtimePlayers.opponent.displayName}
+              </div>
+              <div className="flex items-center justify-between text-[10px] text-rose-200">
+                <span className="tabular-nums font-bold">최고 {realtimePlayers.opponent.bestDishScore}점</span>
+                <span className="truncate">{realtimePlayers.opponent.chefTitle}</span>
+              </div>
             </div>
           </div>
         </div>
-        <div className="flex flex-wrap items-center gap-1.5 text-xs">
-          <span className="font-bold text-cyan-200">{plan.judge.nameKo} 선호:</span>
-          {plan.judge.preferredFlavors.map((f) => (
-            <span
-              key={f}
-              className="rounded-md bg-slate-900/90 px-2 py-0.5 text-[11px] font-bold text-teal-200 border border-white/10"
-            >
-              {FLAVOR_LABELS[f].ko}
-            </span>
-          ))}
+      ) : (
+        <div className="mx-auto flex w-full max-w-2xl flex-wrap items-center justify-between gap-3 rounded-2xl border border-amber-300/45 bg-[#072633]/92 px-5 py-3 shadow-2xl">
+          <div className="flex items-center gap-2.5">
+            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-amber-400/20 text-amber-300">
+              <Swords className="h-5 w-5" />
+            </div>
+            <div>
+              <div className="text-[11px] font-extrabold text-amber-300">투발루 요리 대결 개시!</div>
+              <div className="text-sm font-black text-white">
+                나 <span className="text-amber-300">VS</span> {plan.rival.nameKo}
+              </div>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-1.5 text-xs">
+            <span className="font-bold text-cyan-200">{plan.judge.nameKo} 선호:</span>
+            {plan.judge.preferredFlavors.map((f) => (
+              <span
+                key={f}
+                className="rounded-md bg-slate-900/90 px-2 py-0.5 text-[11px] font-bold text-teal-200 border border-white/10"
+              >
+                {FLAVOR_LABELS[f].ko}
+              </span>
+            ))}
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Bottom Selected Ingredients Cutscene Showcase */}
       <div className="pointer-events-auto mx-auto w-full max-w-2xl rounded-3xl border border-teal-300/40 bg-[#072633]/94 p-5 shadow-2xl">

@@ -2,11 +2,21 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, Flame, SkipForward, Sparkles, Utensils, Wind } from 'lucide-react';
 import { soundEngine } from '../audio/soundEngine';
 import { FISH_TIERS, INGREDIENT_CATALOG } from '../data/tuvaluData';
-import { BattlePlan, CookingStage, CookingStageScores } from '../types/game';
+import {
+  BattlePlan,
+  BattlePlayerSlot,
+  CookingStage,
+  CookingStageScores,
+  RealtimePlayerStage,
+} from '../types/game';
 
 interface CookingMinigameHUDProps {
   stage: CookingStage;
   plan: BattlePlan;
+  realtimePlayers?: {
+    self: BattlePlayerSlot;
+    opponent: BattlePlayerSlot;
+  };
   onStageBurst: (station: 'wash' | 'prep' | 'cook', colorHex: number) => void;
   onPotDrop: (colorHex: number, kind: 'fish' | 'meat' | 'vegetable' | 'salt' | 'spice') => void;
   onFanStroke: () => void;
@@ -14,6 +24,15 @@ interface CookingMinigameHUDProps {
   onStageComplete: (stage: 'wash' | 'prep' | 'cook', score: number) => void;
   scores: CookingStageScores;
 }
+
+const STAGE_LABEL_KO: Record<RealtimePlayerStage, string> = {
+  idle: '대기',
+  intro: '재료 투입',
+  wash: '① 세척 중',
+  prep: '② 손질 중',
+  cook: '③ 부채질 중',
+  done: '요리 완성!',
+};
 
 interface DirtSpot {
   id: number;
@@ -36,6 +55,7 @@ const FAN_TARGET_FOR_100 = 45;
 export const CookingMinigameHUD: React.FC<CookingMinigameHUDProps> = ({
   stage,
   plan,
+  realtimePlayers,
   onStageBurst,
   onPotDrop,
   onFanStroke,
@@ -380,8 +400,47 @@ export const CookingMinigameHUD: React.FC<CookingMinigameHUDProps> = ({
           : '불씨를 키우세요!';
 
   return (
-    <div className="pointer-events-none fixed inset-x-0 bottom-5 z-30 flex justify-center px-4">
-      <div className="pointer-events-auto w-full max-w-xl rounded-3xl border border-amber-300/45 bg-[#072633]/94 p-5 shadow-2xl">
+    <>
+      {realtimePlayers ? (
+        <div className="pointer-events-none fixed inset-x-0 top-16 z-30 flex justify-center px-4">
+          <div className="flex w-full max-w-xl items-center justify-between gap-3 rounded-2xl border border-amber-300/40 bg-[#072633]/92 px-4 py-2.5 text-xs shadow-xl">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-1.5">
+                <span className="rounded bg-cyan-400/20 px-1.5 py-0.5 text-[10px] font-extrabold text-cyan-200">
+                  나
+                </span>
+                <span className="truncate font-extrabold text-white">
+                  {realtimePlayers.self.displayName}
+                </span>
+              </div>
+              <div className="mt-0.5 text-[11px] font-bold text-teal-300">
+                {stage === 'wash' ? '① 세척 중' : stage === 'prep' ? '② 손질 중' : '③ 부채질 중'}
+              </div>
+            </div>
+
+            <div className="shrink-0 rounded-lg bg-slate-900 px-2.5 py-1 text-[11px] font-black text-amber-300">
+              실시간 VS
+            </div>
+
+            <div className="min-w-0 flex-1 text-right">
+              <div className="flex items-center justify-end gap-1.5">
+                <span className="truncate font-extrabold text-white">
+                  {realtimePlayers.opponent.displayName}
+                </span>
+                <span className="rounded bg-rose-500/25 px-1.5 py-0.5 text-[10px] font-extrabold text-rose-200">
+                  상대
+                </span>
+              </div>
+              <div className="mt-0.5 text-[11px] font-bold text-rose-300">
+                {STAGE_LABEL_KO[realtimePlayers.opponent.stage]}
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      <div className="pointer-events-none fixed inset-x-0 bottom-5 z-30 flex justify-center px-4">
+        <div className="pointer-events-auto w-full max-w-xl rounded-3xl border border-amber-300/45 bg-[#072633]/94 p-5 shadow-2xl">
         {/* Progress Header */}
         <div className="flex items-center justify-between border-b border-white/10 pb-3">
           <div className="flex items-center gap-2 text-xs font-extrabold">
@@ -616,6 +675,7 @@ export const CookingMinigameHUD: React.FC<CookingMinigameHUDProps> = ({
         ) : null}
       </div>
     </div>
+    </>
   );
 };
 

@@ -955,7 +955,7 @@ export class TuvaluWorld {
       this.player.root.position.set(0, 0.91, -10.7);
       this.player.root.rotation.y = Math.PI;
       this.setCuttingBoardFish(species ?? null);
-    } else if (stage === 'cook') {
+    } else if (stage === 'cook' || stage === 'waiting_opponent') {
       this.clearIntroShowcase();
       this.setCuttingBoardFish(null);
       this.player.root.position.set(3.4, 0.91, -10.7);
@@ -1949,12 +1949,14 @@ export class TuvaluWorld {
 
     if (hasManualStick) {
       this.autoSail = false;
-      const desiredYaw = Math.atan2(this.virtualMoveX, this.virtualMoveZ);
-      let diff = desiredYaw - this.boatYaw;
-      while (diff > Math.PI) diff -= Math.PI * 2;
-      while (diff < -Math.PI) diff += Math.PI * 2;
-      this.boatYaw += diff * Math.min(1, dt * 4.5);
-      forwardInput = Math.min(1, Math.hypot(this.virtualMoveX, this.virtualMoveZ));
+      const stickUp = -this.virtualMoveZ;
+      const stickRight = this.virtualMoveX;
+      this.boatYaw += -stickRight * 2.1 * dt;
+      if (stickUp >= -0.2) {
+        forwardInput = Math.min(1, Math.max(stickUp, Math.abs(stickRight) * 0.65));
+      } else {
+        forwardInput = stickUp * 0.6;
+      }
     } else if (this.autoSail) {
       const desiredYaw = this.computeAutoSailYaw(
         this.boat.root.position.x,
@@ -2084,7 +2086,7 @@ export class TuvaluWorld {
     } else if (this.cookingStage === 'prep') {
       _camTargetPos.set(0, 3.6, -9.2);
       _camTargetLook.set(0, 1.65, -12.1);
-    } else if (this.cookingStage === 'cook') {
+    } else if (this.cookingStage === 'cook' || this.cookingStage === 'waiting_opponent') {
       _camTargetPos.set(3.4, 3.7, -8.8);
       _camTargetLook.set(3.4, 1.65, -12.1);
     } else if (this.cookingStage === 'judging' || this.cookingStage === 'result') {

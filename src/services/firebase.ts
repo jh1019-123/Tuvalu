@@ -9,19 +9,31 @@ import {
 import {
   collection,
   doc,
+  DocumentData,
   getDoc,
   getDocFromServer,
   getDocs,
   getFirestore,
   limit,
+  onSnapshot,
   query,
+  runTransaction,
   serverTimestamp,
+  Timestamp,
   where,
   writeBatch,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { getChefTitleForWins } from '../data/tuvaluData';
-import { FishTier, LeaderboardEntryData, UserProfileData } from '../types/game';
+import {
+  BattlePlayerSlot,
+  BattleRoomData,
+  FishTier,
+  LeaderboardEntryData,
+  RealtimePlayerStage,
+  RealtimeRoomStatus,
+  UserProfileData,
+} from '../types/game';
 
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
@@ -377,5 +389,618 @@ export async function fetchLeaderboard(): Promise<LeaderboardEntryData[]> {
     return entries.slice(0, 25);
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, path);
+  }
+}
+
+// === Real-Time 1v1 Cooking Battle Rooms ===
+
+export class BattleRoomError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'BattleRoomError';
+  }
+}
+
+const ROOM_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+export function normalizeRoomCode(raw: string): string {
+  return raw.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
+}
+
+function generateRoomCode(): string {
+  let code = '';
+  for (let i = 0; i < 6; i += 1) {
+    code += ROOM_CODE_CHARS[Math.floor(Math.random() * ROOM_CODE_CHARS.length)];
+  }
+  return code;
+}
+
+function toMs(ts: unknown): number {
+  if (ts instanceof Timestamp) return ts.toMillis();
+  if (ts && typeof ts === 'object' && 'toMillis' in ts && typeof (ts as { toMillis: unknown }).toMillis === 'function') {
+    return (ts as { toMillis: () => number }).toMillis();
+  }
+  return Date.now();
+}
+
+export function buildEmptyBattleSlot(): BattlePlayerSlot {
+  return {
+    uid: '',
+    displayName: '',
+    chefTitle: '',
+    wins: 0,
+    losses: 0,
+    bestDishScore: 0,
+    rarestFishTier: 'none',
+    ready: false,
+    fishSpeciesId: '',
+    fishWeightKg: 0,
+    ingredientIds: [],
+    stage: 'idle',
+    washScore: 0,
+    prepScore: 0,
+    cookScore: 0,
+    perfectionScore: 0,
+    palateScore: 0,
+    totalScore: 0,
+    dishNameKo: '',
+  };
+}
+
+export function buildPlayerSlotFromProfile(profile: UserProfileData): BattlePlayerSlot {
+  const wins = clampInt(profile.wins, 0, 100000);
+  const losses = clampInt(profile.losses, 0, 100000);
+  return {
+    uid: profile.uid,
+    displayName: sanitizeDisplayName(profile.displayName),
+    chefTitle: getChefTitleForWins(wins).slice(0, 40),
+    wins,
+    losses,
+    bestDishScore: clampInt(profile.bestDishScore, 0, 1000),
+    rarestFishTier: sanitizeTier(profile.rarestFishTier),
+    ready: false,
+    fishSpeciesId: '',
+    fishWeightKg: 0,
+    ingredientIds: [],
+    stage: 'idle',
+    washScore: 0,
+    prepScore: 0,
+    cookScore: 0,
+    perfectionScore: 0,
+    palateScore: 0,
+    totalScore: 0,
+    dishNameKo: '',
+  };
+}
+
+function sanitizeSlot(raw: Record<string, unknown> | undefined): BattlePlayerSlot {
+  const d = raw ?? {};
+  const rawIngs = Array.isArray(d.ingredientIds) ? d.ingredientIds : [];
+  const ingredientIds = rawIngs
+    .map((x) => String(x ?? '').slice(0, 60))
+    .filter((x) => x.length > 0)
+    .slice(0, 3);
+  const stageStr = String(d.stage ?? 'idle');
+  const stage: RealtimePlayerStage =
+    stageStr === 'intro' ||
+    stageStr === 'wash' ||
+    stageStr === 'prep' ||
+    stageStr === 'cook' ||
+    stageStr === 'done'
+      ? stageStr
+      : 'idle';
+
+  return {
+    uid: String(d.uid ?? ''),
+    displayName: String(d.displayName ?? ''),
+    chefTitle: String(d.chefTitle ?? ''),
+    wins: clampInt(Number(d.wins ?? 0), 0, 100000),
+    losses: clampInt(Number(d.losses ?? 0), 0, 100000),
+    bestDishScore: clampInt(Number(d.bestDishScore ?? 0), 0, 1000),
+    rarestFishTier: sanitizeTier(String(d.rarestFishTier ?? 'none')),
+    ready: Boolean(d.ready),
+    fishSpeciesId: String(d.fishSpeciesId ?? '').slice(0, 60),
+    fishWeightKg: Math.max(0, Math.min(500, Number(d.fishWeightKg ?? 0) || 0)),
+    ingredientIds,
+    stage,
+    washScore: clampInt(Number(d.washScore ?? 0), 0, 100),
+    prepScore: clampInt(Number(d.prepScore ?? 0), 0, 100),
+    cookScore: clampInt(Number(d.cookScore ?? 0), 0, 100),
+    perfectionScore: clampInt(Number(d.perfectionScore ?? 0), 0, 100),
+    palateScore: clampInt(Number(d.palateScore ?? 0), 0, 100),
+    totalScore: clampInt(Number(d.totalScore ?? 0), 0, 200),
+    dishNameKo: String(d.dishNameKo ?? '').slice(0, 80),
+  };
+}
+
+function parseBattleRoom(id: string, data: DocumentData): BattleRoomData {
+  const statusStr = String(data.status ?? 'waiting');
+  const status: RealtimeRoomStatus =
+    statusStr === 'prep' ||
+    statusStr === 'playing' ||
+    statusStr === 'finished' ||
+    statusStr === 'cancelled'
+      ? statusStr
+      : 'waiting';
+
+  return {
+    roomId: String(data.roomId ?? id),
+    status,
+    isMatchmaking: Boolean(data.isMatchmaking),
+    judgeId: String(data.judgeId ?? 'judge_taupola'),
+    hostUid: String(data.hostUid ?? ''),
+    guestUid: String(data.guestUid ?? ''),
+    host: sanitizeSlot(data.host as Record<string, unknown> | undefined),
+    guest: sanitizeSlot(data.guest as Record<string, unknown> | undefined),
+    winnerUid: String(data.winnerUid ?? ''),
+    createdAtMs: toMs(data.createdAt),
+    startedAtMs: toMs(data.startedAt),
+    updatedAtMs: toMs(data.updatedAt),
+  };
+}
+
+function serializeSlot(slot: BattlePlayerSlot): Record<string, unknown> {
+  return {
+    uid: slot.uid,
+    displayName: slot.uid ? sanitizeDisplayName(slot.displayName) : '',
+    chefTitle: slot.uid ? slot.chefTitle.slice(0, 40) : '',
+    wins: clampInt(slot.wins, 0, 100000),
+    losses: clampInt(slot.losses, 0, 100000),
+    bestDishScore: clampInt(slot.bestDishScore, 0, 1000),
+    rarestFishTier: sanitizeTier(slot.rarestFishTier),
+    ready: Boolean(slot.ready),
+    fishSpeciesId: slot.fishSpeciesId.slice(0, 60),
+    fishWeightKg: Math.max(0, Math.min(500, Math.round(slot.fishWeightKg * 10) / 10)),
+    ingredientIds: slot.ingredientIds
+      .map((x) => x.trim().slice(0, 60))
+      .filter((x) => x.length > 0)
+      .slice(0, 3),
+    stage: slot.stage,
+    washScore: clampInt(slot.washScore, 0, 100),
+    prepScore: clampInt(slot.prepScore, 0, 100),
+    cookScore: clampInt(slot.cookScore, 0, 100),
+    perfectionScore: clampInt(slot.perfectionScore, 0, 100),
+    palateScore: clampInt(slot.palateScore, 0, 100),
+    totalScore: clampInt(slot.totalScore, 0, 200),
+    dishNameKo: slot.dishNameKo.slice(0, 80),
+  };
+}
+
+export async function createBattleRoom(
+  profile: UserProfileData,
+  isMatchmaking: boolean,
+  judgeId: string,
+): Promise<BattleRoomData> {
+  const uid = auth.currentUser?.uid || profile.uid;
+  const hostSlot = buildPlayerSlotFromProfile({ ...profile, uid });
+  const emptyGuest = buildEmptyBattleSlot();
+  const safeJudgeId = judgeId.trim().slice(0, 40) || 'judge_taupola';
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const roomId = generateRoomCode();
+    const path = `battleRooms/${roomId}`;
+    try {
+      const created = await runTransaction(db, async (tx) => {
+        const roomRef = doc(db, 'battleRooms', roomId);
+        const snap = await tx.get(roomRef);
+        if (snap.exists()) {
+          return null;
+        }
+        tx.set(roomRef, {
+          roomId,
+          status: 'waiting',
+          isMatchmaking,
+          judgeId: safeJudgeId,
+          hostUid: uid,
+          guestUid: '',
+          host: serializeSlot(hostSlot),
+          guest: serializeSlot(emptyGuest),
+          winnerUid: '',
+          createdAt: serverTimestamp(),
+          startedAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+        return {
+          roomId,
+          status: 'waiting' as const,
+          isMatchmaking,
+          judgeId: safeJudgeId,
+          hostUid: uid,
+          guestUid: '',
+          host: hostSlot,
+          guest: emptyGuest,
+          winnerUid: '',
+          createdAtMs: Date.now(),
+          startedAtMs: Date.now(),
+          updatedAtMs: Date.now(),
+        };
+      });
+      if (created) return created;
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, path);
+    }
+  }
+
+  throw new BattleRoomError('방 코드 생성에 실패했습니다. 다시 시도해 주세요.');
+}
+
+export async function joinBattleRoomByCode(
+  rawRoomCode: string,
+  profile: UserProfileData,
+): Promise<BattleRoomData> {
+  const roomId = normalizeRoomCode(rawRoomCode);
+  if (roomId.length !== 6) {
+    throw new BattleRoomError('방 코드는 영문/숫자 6자리여야 합니다.');
+  }
+
+  const uid = auth.currentUser?.uid || profile.uid;
+  const guestSlot = buildPlayerSlotFromProfile({ ...profile, uid });
+  const path = `battleRooms/${roomId}`;
+
+  try {
+    return await runTransaction(db, async (tx) => {
+      const roomRef = doc(db, 'battleRooms', roomId);
+      const snap = await tx.get(roomRef);
+      if (!snap.exists()) {
+        throw new BattleRoomError('존재하지 않는 방 코드입니다. 코드를 다시 확인해 주세요.');
+      }
+      const room = parseBattleRoom(roomId, snap.data());
+      if (room.hostUid === uid) {
+        throw new BattleRoomError('내가 만든 방에는 참가자로 들어갈 수 없습니다.');
+      }
+      if (room.status !== 'waiting' || room.guestUid !== '') {
+        throw new BattleRoomError('이미 다른 참가자가 입장했거나 종료된 방입니다.');
+      }
+
+      tx.update(roomRef, {
+        guestUid: uid,
+        guest: serializeSlot(guestSlot),
+        status: 'prep',
+        updatedAt: serverTimestamp(),
+      });
+
+      return {
+        ...room,
+        guestUid: uid,
+        guest: guestSlot,
+        status: 'prep',
+        updatedAtMs: Date.now(),
+      };
+    });
+  } catch (error) {
+    if (error instanceof BattleRoomError) throw error;
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function findOrCreateMatchmakingRoom(
+  profile: UserProfileData,
+  judgeId: string,
+): Promise<{ room: BattleRoomData; role: 'host' | 'guest' }> {
+  const uid = auth.currentUser?.uid || profile.uid;
+  const path = 'battleRooms';
+
+  try {
+    const q = query(
+      collection(db, 'battleRooms'),
+      where('status', '==', 'waiting'),
+      where('isMatchmaking', '==', true),
+      where('guestUid', '==', ''),
+      limit(12),
+    );
+    const snap = await getDocs(q);
+    const cutoffMs = Date.now() - 15 * 60 * 1000;
+
+    const candidates = snap.docs
+      .map((d) => parseBattleRoom(d.id, d.data()))
+      .filter((r) => r.hostUid !== uid && r.createdAtMs >= cutoffMs);
+
+    for (const candidate of candidates) {
+      try {
+        const joined = await joinBattleRoomByCode(candidate.roomId, profile);
+        return { room: joined, role: 'guest' };
+      } catch (err) {
+        if (err instanceof BattleRoomError) {
+          // Race: another player joined first; try next candidate
+          continue;
+        }
+        throw err;
+      }
+    }
+
+    const created = await createBattleRoom(profile, true, judgeId);
+    return { room: created, role: 'host' };
+  } catch (error) {
+    if (error instanceof BattleRoomError) throw error;
+    handleFirestoreError(error, OperationType.LIST, path);
+  }
+}
+
+export function subscribeBattleRoom(
+  roomId: string,
+  onData: (room: BattleRoomData | null) => void,
+  onError?: (err: Error) => void,
+): () => void {
+  const path = `battleRooms/${roomId}`;
+  return onSnapshot(
+    doc(db, 'battleRooms', roomId),
+    (snap) => {
+      if (!snap.exists()) {
+        onData(null);
+        return;
+      }
+      onData(parseBattleRoom(snap.id, snap.data()));
+    },
+    (error) => {
+      if (onError) {
+        onError(error);
+      }
+      handleFirestoreError(error, OperationType.GET, path);
+    },
+  );
+}
+
+export async function updateRealtimePrepChoice(
+  roomId: string,
+  role: 'host' | 'guest',
+  payload: {
+    fishSpeciesId: string;
+    fishWeightKg: number;
+    ingredientIds: string[];
+    ready: boolean;
+  },
+): Promise<BattleRoomData> {
+  const path = `battleRooms/${roomId}`;
+  const uid = auth.currentUser?.uid;
+  try {
+    return await runTransaction(db, async (tx) => {
+      const roomRef = doc(db, 'battleRooms', roomId);
+      const snap = await tx.get(roomRef);
+      if (!snap.exists()) {
+        throw new BattleRoomError('대결 방이 존재하지 않습니다.');
+      }
+      const room = parseBattleRoom(roomId, snap.data());
+      if (room.status !== 'waiting' && room.status !== 'prep') {
+        return room;
+      }
+      if (role === 'host' && uid && room.hostUid !== uid) {
+        throw new BattleRoomError('방장 권한이 없습니다.');
+      }
+      if (role === 'guest' && uid && room.guestUid !== uid) {
+        throw new BattleRoomError('참가자 권한이 없습니다.');
+      }
+
+      const selfSlot = role === 'host' ? room.host : room.guest;
+      const otherSlot = role === 'host' ? room.guest : room.host;
+
+      const nextSelf: BattlePlayerSlot = {
+        ...selfSlot,
+        fishSpeciesId: payload.fishSpeciesId.slice(0, 60),
+        fishWeightKg: Math.max(0, Math.min(500, Math.round(payload.fishWeightKg * 10) / 10)),
+        ingredientIds: payload.ingredientIds.slice(0, 3),
+        ready: payload.ready,
+        stage: 'idle',
+      };
+
+      const bothReady = room.status === 'prep' && nextSelf.ready && otherSlot.ready;
+      const updates: Record<string, unknown> = {
+        [role]: serializeSlot(
+          bothReady ? { ...nextSelf, stage: 'intro' } : nextSelf,
+        ),
+        updatedAt: serverTimestamp(),
+      };
+
+      if (bothReady) {
+        updates.status = 'playing';
+        updates.startedAt = serverTimestamp();
+      }
+
+      tx.update(roomRef, updates);
+
+      return {
+        ...room,
+        status: bothReady ? 'playing' : room.status,
+        [role]: bothReady ? { ...nextSelf, stage: 'intro' } : nextSelf,
+        updatedAtMs: Date.now(),
+      };
+    });
+  } catch (error) {
+    if (error instanceof BattleRoomError) throw error;
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function updateRealtimeBattleStage(
+  roomId: string,
+  role: 'host' | 'guest',
+  payload: {
+    stage: RealtimePlayerStage;
+    washScore?: number;
+    prepScore?: number;
+    cookScore?: number;
+  },
+): Promise<void> {
+  const path = `battleRooms/${roomId}`;
+  try {
+    await runTransaction(db, async (tx) => {
+      const roomRef = doc(db, 'battleRooms', roomId);
+      const snap = await tx.get(roomRef);
+      if (!snap.exists()) return;
+      const room = parseBattleRoom(roomId, snap.data());
+      if (room.status !== 'playing') return;
+
+      const selfSlot = role === 'host' ? room.host : room.guest;
+      const nextSelf: BattlePlayerSlot = {
+        ...selfSlot,
+        stage: payload.stage,
+        washScore: payload.washScore !== undefined ? clampInt(payload.washScore, 0, 100) : selfSlot.washScore,
+        prepScore: payload.prepScore !== undefined ? clampInt(payload.prepScore, 0, 100) : selfSlot.prepScore,
+        cookScore: payload.cookScore !== undefined ? clampInt(payload.cookScore, 0, 100) : selfSlot.cookScore,
+      };
+
+      tx.update(roomRef, {
+        [role]: serializeSlot(nextSelf),
+        updatedAt: serverTimestamp(),
+      });
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function submitRealtimeBattleFinish(
+  roomId: string,
+  role: 'host' | 'guest',
+  payload: {
+    washScore: number;
+    prepScore: number;
+    cookScore: number;
+    perfectionScore: number;
+    palateScore: number;
+    totalScore: number;
+    dishNameKo: string;
+  },
+): Promise<BattleRoomData> {
+  const path = `battleRooms/${roomId}`;
+  try {
+    return await runTransaction(db, async (tx) => {
+      const roomRef = doc(db, 'battleRooms', roomId);
+      const snap = await tx.get(roomRef);
+      if (!snap.exists()) {
+        throw new BattleRoomError('대결 방 정보를 찾을 수 없습니다.');
+      }
+      const room = parseBattleRoom(roomId, snap.data());
+      if (room.status === 'finished' || room.status === 'cancelled') {
+        return room;
+      }
+
+      const selfSlot = role === 'host' ? room.host : room.guest;
+      const otherSlot = role === 'host' ? room.guest : room.host;
+
+      const washScore = clampInt(payload.washScore, 0, 100);
+      const prepScore = clampInt(payload.prepScore, 0, 100);
+      const cookScore = clampInt(payload.cookScore, 0, 100);
+      const perfectionScore = clampInt(payload.perfectionScore, 0, 100);
+      const palateScore = clampInt(payload.palateScore, 0, 100);
+      const totalScore = clampInt(perfectionScore + palateScore, 0, 200);
+
+      const nextSelf: BattlePlayerSlot = {
+        ...selfSlot,
+        stage: 'done',
+        washScore,
+        prepScore,
+        cookScore,
+        perfectionScore,
+        palateScore,
+        totalScore,
+        dishNameKo: payload.dishNameKo.slice(0, 80),
+      };
+
+      const updates: Record<string, unknown> = {
+        [role]: serializeSlot(nextSelf),
+        updatedAt: serverTimestamp(),
+      };
+
+      let nextStatus: RealtimeRoomStatus = room.status;
+      let nextWinnerUid = room.winnerUid;
+
+      if (otherSlot.stage === 'done') {
+        nextStatus = 'finished';
+        const hostScore = role === 'host' ? totalScore : otherSlot.totalScore;
+        const guestScore = role === 'guest' ? totalScore : otherSlot.totalScore;
+        if (hostScore > guestScore) nextWinnerUid = room.hostUid;
+        else if (guestScore > hostScore) nextWinnerUid = room.guestUid;
+        else nextWinnerUid = 'draw';
+
+        updates.status = 'finished';
+        updates.winnerUid = nextWinnerUid;
+      }
+
+      tx.update(roomRef, updates);
+
+      return {
+        ...room,
+        status: nextStatus,
+        winnerUid: nextWinnerUid,
+        [role]: nextSelf,
+        updatedAtMs: Date.now(),
+      };
+    });
+  } catch (error) {
+    if (error instanceof BattleRoomError) throw error;
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function finalizeTimedOutRealtimeBattle(
+  roomId: string,
+  role: 'host' | 'guest',
+): Promise<BattleRoomData> {
+  const path = `battleRooms/${roomId}`;
+  try {
+    return await runTransaction(db, async (tx) => {
+      const roomRef = doc(db, 'battleRooms', roomId);
+      const snap = await tx.get(roomRef);
+      if (!snap.exists()) {
+        throw new BattleRoomError('대결 방 정보를 찾을 수 없습니다.');
+      }
+      const room = parseBattleRoom(roomId, snap.data());
+      if (room.status === 'finished' || room.status === 'cancelled') {
+        return room;
+      }
+
+      const selfUid = role === 'host' ? room.hostUid : room.guestUid;
+      const otherSlot = role === 'host' ? room.guest : room.host;
+      const selfSlot = role === 'host' ? room.host : room.guest;
+
+      let winnerUid = selfUid;
+      if (otherSlot.stage === 'done') {
+        const hostScore = room.host.totalScore;
+        const guestScore = room.guest.totalScore;
+        winnerUid = hostScore > guestScore ? room.hostUid : guestScore > hostScore ? room.guestUid : 'draw';
+      }
+
+      tx.update(roomRef, {
+        [role]: serializeSlot(selfSlot),
+        status: 'finished',
+        winnerUid,
+        updatedAt: serverTimestamp(),
+      });
+
+      return {
+        ...room,
+        status: 'finished',
+        winnerUid,
+        updatedAtMs: Date.now(),
+      };
+    });
+  } catch (error) {
+    if (error instanceof BattleRoomError) throw error;
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
+export async function cancelOrLeaveBattleRoom(
+  roomId: string,
+  role: 'host' | 'guest',
+): Promise<void> {
+  const path = `battleRooms/${roomId}`;
+  try {
+    await runTransaction(db, async (tx) => {
+      const roomRef = doc(db, 'battleRooms', roomId);
+      const snap = await tx.get(roomRef);
+      if (!snap.exists()) return;
+      const room = parseBattleRoom(roomId, snap.data());
+      if (room.status === 'finished' || room.status === 'cancelled') return;
+
+      const selfSlot = role === 'host' ? room.host : room.guest;
+      tx.update(roomRef, {
+        [role]: serializeSlot(selfSlot),
+        status: 'cancelled',
+        updatedAt: serverTimestamp(),
+      });
+    });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
   }
 }

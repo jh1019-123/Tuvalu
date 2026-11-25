@@ -1,5 +1,5 @@
 /**
- * Dirty Dozen Security Test Specification for Tuvalu: Laguna Chef
+ * Dirty Dozen+ Security Test Specification for Tuvalu: Laguna Chef
  * Documents expected PERMISSION_DENIED outcomes for adversarial payloads.
  */
 export interface DirtyDozenCase {
@@ -130,6 +130,35 @@ export const DIRTY_DOZEN_CASES: DirtyDozenCase[] = [
     operation: 'list',
     authUid: null,
     emailVerified: false,
+    expectedResult: 'PERMISSION_DENIED',
+  },
+  {
+    id: 13,
+    name: 'Host joining own battle room',
+    collection: 'battleRooms/AB12CD',
+    operation: 'update',
+    authUid: 'alice',
+    emailVerified: true,
+    payload: { guestUid: 'alice', status: 'prep' },
+    expectedResult: 'PERMISSION_DENIED',
+  },
+  {
+    id: 14,
+    name: 'Unfiltered battleRooms list scraping private rooms',
+    collection: 'battleRooms',
+    operation: 'list',
+    authUid: 'bob',
+    emailVerified: true,
+    expectedResult: 'PERMISSION_DENIED',
+  },
+  {
+    id: 15,
+    name: 'Third-party hijacking host slot or mutating finished room',
+    collection: 'battleRooms/AB12CD',
+    operation: 'update',
+    authUid: 'charlie',
+    emailVerified: true,
+    payload: { status: 'finished', winnerUid: 'charlie' },
     expectedResult: 'PERMISSION_DENIED',
   },
 ];

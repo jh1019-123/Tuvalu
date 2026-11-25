@@ -35,10 +35,10 @@ export const MobileJoystick: React.FC<MobileJoystickProps> = ({ onMove }) => {
   };
 
   return (
-    <div className="pointer-events-auto fixed bottom-24 left-4 z-20 flex flex-col items-center lg:hidden">
+    <div className="pointer-events-auto fixed bottom-24 left-4 z-30 flex flex-col items-center">
       <div
         ref={padRef}
-        className="relative flex h-24 w-24 touch-none items-center justify-center rounded-full border-2 border-teal-300/45 bg-[#072633]/80 shadow-xl"
+        className="relative flex h-24 w-24 touch-none items-center justify-center rounded-full border-2 border-teal-300/45 bg-[#072633]/85 shadow-xl"
         onPointerDown={(e) => {
           e.preventDefault();
           activePointerRef.current = e.pointerId;

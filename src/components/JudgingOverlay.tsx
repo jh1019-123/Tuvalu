@@ -1,32 +1,91 @@
-import React from 'react';
-import { Award, CheckCircle2, RotateCcw, Trophy } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { Award, CheckCircle2, Clock, Loader2, RotateCcw, Trophy } from 'lucide-react';
 import { FISH_CATALOG, INGREDIENT_CATALOG } from '../data/tuvaluData';
-import { BattlePlan, BattleVerdict } from '../types/game';
+import { BattlePlan, BattlePlayerSlot, BattleVerdict, RealtimePlayerStage } from '../types/game';
 import { DishIllustrationSVG } from './DishIllustrationSVG';
 
 interface JudgingOverlayProps {
-  phase: 'judging' | 'result';
+  phase: 'waiting_opponent' | 'judging' | 'result';
   plan: BattlePlan;
   verdict: BattleVerdict | null;
+  realtimePlayers?: {
+    self: BattlePlayerSlot;
+    opponent: BattlePlayerSlot;
+    roomCode: string;
+  };
   isSignedIn: boolean;
   rankPublished: boolean;
   publishingRank: boolean;
+  onForceTimeoutFinish?: () => void;
   onPublishRank: () => void;
   onSignInAndPublish: () => void;
   onFinish: () => void;
 }
 
+const OPP_STAGE_TEXT: Record<RealtimePlayerStage, string> = {
+  idle: '준비 중',
+  intro: '재료 냄비 투입 중',
+  wash: '1단계: 재료 세척 중',
+  prep: '2단계: 물고기 손질 중',
+  cook: '3단계: 화덕 부채질 중',
+  done: '요리 완성!',
+};
+
 export const JudgingOverlay: React.FC<JudgingOverlayProps> = ({
   phase,
   plan,
   verdict,
+  realtimePlayers,
   isSignedIn,
   rankPublished,
   publishingRank,
+  onForceTimeoutFinish,
   onPublishRank,
   onSignInAndPublish,
   onFinish,
 }) => {
+  const [waitedSec, setWaitedSec] = useState(0);
+
+  useEffect(() => {
+    if (phase !== 'waiting_opponent') {
+      setWaitedSec(0);
+      return;
+    }
+    const iv = window.setInterval(() => {
+      setWaitedSec((s) => s + 1);
+    }, 1000);
+    return () => clearInterval(iv);
+  }, [phase]);
+
+  if (phase === 'waiting_opponent' && realtimePlayers) {
+    return (
+      <div className="pointer-events-none fixed inset-x-0 bottom-8 z-30 flex justify-center px-4">
+        <div className="pointer-events-auto w-full max-w-xl rounded-3xl border border-amber-300/45 bg-[#072633]/95 p-6 text-center shadow-2xl">
+          <div className="inline-flex items-center gap-2 rounded-full bg-emerald-500/20 px-3 py-1 text-xs font-extrabold text-emerald-200">
+            <CheckCircle2 className="h-4 w-4" /> 내 요리 조리 완료! ({realtimePlayers.self.totalScore}점)
+          </div>
+          <h3 className="mt-2 font-display text-xl font-extrabold text-white">
+            {realtimePlayers.opponent.displayName}님의 요리가 완성되기를 기다리는 중...
+          </h3>
+          <div className="mt-3 flex items-center justify-center gap-2 text-xs font-bold text-cyan-200">
+            <Loader2 className="h-4 w-4 animate-spin text-amber-300" />
+            <span>상대 현재 진행: {OPP_STAGE_TEXT[realtimePlayers.opponent.stage]}</span>
+            <span className="text-slate-400 tabular-nums">({waitedSec}초 대기)</span>
+          </div>
+          {waitedSec >= 26 && onForceTimeoutFinish ? (
+            <button
+              type="button"
+              onClick={onForceTimeoutFinish}
+              className="mt-4 inline-flex items-center gap-1.5 rounded-xl bg-amber-400 px-4 py-2 text-xs font-extrabold text-slate-950 hover:bg-amber-300 cursor-pointer"
+            >
+              <Clock className="h-3.5 w-3.5" /> 상대 응답 지연 — 현재 점수로 판정 마감하기
+            </button>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
+
   if (phase === 'judging') {
     return (
       <div className="pointer-events-none fixed inset-x-0 bottom-8 z-30 flex justify-center px-4">
@@ -47,16 +106,30 @@ export const JudgingOverlay: React.FC<JudgingOverlayProps> = ({
 
   if (!verdict) return null;
 
-  const rivalFish =
-    FISH_CATALOG.find((f) => f.id === plan.rival.specialtyFishId) ?? FISH_CATALOG[5];
+  const isRealtime = Boolean(realtimePlayers);
+  const opponentSlot = realtimePlayers?.opponent;
+  const selfSlot = realtimePlayers?.self;
+
+  const rivalFish = isRealtime && opponentSlot
+    ? FISH_CATALOG.find((f) => f.id === opponentSlot.fishSpeciesId) ?? FISH_CATALOG[0]
+    : FISH_CATALOG.find((f) => f.id === plan.rival.specialtyFishId) ?? FISH_CATALOG[5];
 
   const playerIngredients = plan.ingredientIds
     .map((id) => INGREDIENT_CATALOG.find((i) => i.id === id))
     .filter((x): x is NonNullable<typeof x> => Boolean(x));
 
-  const rivalIngredients = plan.rival.specialtyIngredientIds
+  const opponentIngredientIds = isRealtime && opponentSlot
+    ? opponentSlot.ingredientIds
+    : plan.rival.specialtyIngredientIds;
+
+  const rivalIngredients = opponentIngredientIds
     .map((id) => INGREDIENT_CATALOG.find((i) => i.id === id))
     .filter((x): x is NonNullable<typeof x> => Boolean(x));
+
+  const opponentDisplayName = isRealtime && opponentSlot ? opponentSlot.displayName : plan.rival.nameKo;
+  const opponentDishTitle = isRealtime && opponentSlot
+    ? opponentSlot.dishNameKo || `${rivalFish.nameKo} 투발루 특선 요리`
+    : plan.rival.specialtyDishKo;
 
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/70 p-3 sm:p-4">
@@ -73,7 +146,9 @@ export const JudgingOverlay: React.FC<JudgingOverlayProps> = ({
             {verdict.won ? <Trophy className="h-7 w-7" /> : <Award className="h-7 w-7" />}
           </div>
           <span className="mt-1.5 text-xs font-extrabold uppercase tracking-widest text-teal-300">
-            {plan.judge.nameKo}의 심사 결과 · 완성 요리 공개
+            {isRealtime
+              ? `실시간 1:1 배틀 결과 (${realtimePlayers?.roomCode}) · ${plan.judge.nameKo} 심사`
+              : `${plan.judge.nameKo}의 심사 결과 · 완성 요리 공개`}
           </span>
           <h2 className="mt-0.5 font-display text-2xl sm:text-3xl font-extrabold text-white">
             {verdict.won ? '요리 대결 승리!' : verdict.isDraw ? '무승부 명승부!' : '아쉬운 패배!'}
@@ -91,12 +166,17 @@ export const JudgingOverlay: React.FC<JudgingOverlayProps> = ({
             }`}
           >
             <div>
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-2">
                 <span className="rounded-lg bg-cyan-400/20 px-2.5 py-0.5 text-xs font-extrabold text-cyan-200">
-                  나의 완성 요리
+                  {isRealtime && selfSlot ? `${selfSlot.displayName} (나)` : '나의 완성 요리'}
                 </span>
                 <span className="text-xs font-bold text-amber-200">{plan.fishSpecies.nameKo}</span>
               </div>
+              {isRealtime && selfSlot ? (
+                <div className="mt-1 text-[11px] text-teal-200">
+                  {selfSlot.chefTitle} · {selfSlot.wins}승 {selfSlot.losses}패
+                </div>
+              ) : null}
               <h3 className="mt-1.5 text-base font-extrabold text-white">{verdict.dishNameKo}</h3>
 
               <div className="mt-2 flex justify-center rounded-2xl border border-white/10 bg-slate-900/55 py-2">
@@ -140,39 +220,50 @@ export const JudgingOverlay: React.FC<JudgingOverlayProps> = ({
             </div>
           </div>
 
-          {/* Rival Dish Card */}
+          {/* Opponent / Rival Dish Card */}
           <div className="flex flex-col justify-between rounded-2xl border border-rose-400/35 bg-[#1a2234] p-4">
             <div>
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-2">
                 <span className="rounded-lg bg-rose-500/20 px-2.5 py-0.5 text-xs font-extrabold text-rose-200">
-                  {plan.rival.nameKo}의 완성 요리
+                  {isRealtime ? `${opponentDisplayName} (상대)` : `${opponentDisplayName}의 완성 요리`}
                 </span>
                 <span className="text-xs font-bold text-rose-200">{rivalFish.nameKo}</span>
               </div>
-              <h3 className="mt-1.5 text-base font-extrabold text-white">{plan.rival.specialtyDishKo}</h3>
+              {isRealtime && opponentSlot ? (
+                <div className="mt-1 text-[11px] text-rose-200/80">
+                  {opponentSlot.chefTitle} · {opponentSlot.wins}승 {opponentSlot.losses}패
+                </div>
+              ) : null}
+              <h3 className="mt-1.5 text-base font-extrabold text-white">{opponentDishTitle}</h3>
 
               <div className="mt-2 flex justify-center rounded-2xl border border-white/10 bg-slate-900/55 py-2">
                 <DishIllustrationSVG
                   fishSpecies={rivalFish}
-                  ingredientIds={plan.rival.specialtyIngredientIds}
+                  ingredientIds={opponentIngredientIds}
                   perfection={verdict.rivalPerfection}
                   size="lg"
                 />
               </div>
 
-              <p className="mt-2.5 rounded-xl bg-slate-900/65 p-2.5 text-xs leading-relaxed text-rose-100/90">
-                {plan.rival.specialtyDescriptionKo}
-              </p>
+              {!isRealtime ? (
+                <p className="mt-2.5 rounded-xl bg-slate-900/65 p-2.5 text-xs leading-relaxed text-rose-100/90">
+                  {plan.rival.specialtyDescriptionKo}
+                </p>
+              ) : null}
 
               <div className="mt-2 flex flex-wrap gap-1.5">
-                {rivalIngredients.map((ing) => (
-                  <span
-                    key={ing.id}
-                    className="rounded-md border border-rose-300/20 bg-slate-900/70 px-2 py-0.5 text-[11px] font-bold text-rose-200"
-                  >
-                    + {ing.nameKo}
-                  </span>
-                ))}
+                {rivalIngredients.length > 0 ? (
+                  rivalIngredients.map((ing) => (
+                    <span
+                      key={ing.id}
+                      className="rounded-md border border-rose-300/20 bg-slate-900/70 px-2 py-0.5 text-[11px] font-bold text-rose-200"
+                    >
+                      + {ing.nameKo}
+                    </span>
+                  ))
+                ) : (
+                  <span className="text-[11px] text-slate-400">추가 식재료 없이 순수 생선 요리로 출전</span>
+                )}
               </div>
             </div>
 
