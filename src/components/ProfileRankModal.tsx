@@ -1,7 +1,13 @@
 import React, { useEffect, useState } from 'react';
-import { Award, BookOpen, LogIn, LogOut, Trophy, UserCheck, X } from 'lucide-react';
+import { Award, BookOpen, Copy, ExternalLink, LogIn, LogOut, Trophy, UserCheck, X } from 'lucide-react';
 import { FISH_CATALOG, FISH_TIERS, getChefTitleForWins } from '../data/tuvaluData';
-import { fetchLeaderboard } from '../services/firebase';
+import {
+  AuthSignInError,
+  fetchLeaderboard,
+  formatBattleErrorKo,
+  isEmbeddedFrame,
+  isInAppBrowser,
+} from '../services/firebase';
 import { LeaderboardEntryData, UserProfileData } from '../types/game';
 
 interface ProfileRankModalProps {
@@ -12,7 +18,7 @@ interface ProfileRankModalProps {
   publishing: boolean;
   statusMessage: string | null;
   onUpdateDisplayName: (name: string) => void;
-  onSignIn: () => void;
+  onSignIn: () => Promise<void>;
   onSignOut: () => void;
   onPublishRank: () => void;
   onClose: () => void;
@@ -35,6 +41,29 @@ export const ProfileRankModal: React.FC<ProfileRankModalProps> = ({
   const [nameInput, setNameInput] = useState(profile.displayName);
   const [entries, setEntries] = useState<LeaderboardEntryData[]>([]);
   const [loadingRank, setLoadingRank] = useState(false);
+  const [signingIn, setSigningIn] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [showExternalHelp, setShowExternalHelp] = useState(() => isInAppBrowser());
+  const [urlCopied, setUrlCopied] = useState(false);
+
+  const handleSignInClick = async () => {
+    setSigningIn(true);
+    setAuthError(null);
+    try {
+      await onSignIn();
+    } catch (err) {
+      if (err instanceof AuthSignInError && err.code === 'auth/redirect-started') {
+        setAuthError(err.message);
+        return;
+      }
+      if (err instanceof AuthSignInError && err.needsExternalBrowser) {
+        setShowExternalHelp(true);
+      }
+      setAuthError(formatBattleErrorKo(err, 'Google 로그인에 실패했거나 창이 닫혔습니다.'));
+    } finally {
+      setSigningIn(false);
+    }
+  };
 
   useEffect(() => {
     setNameInput(profile.displayName);
@@ -120,32 +149,75 @@ export const ProfileRankModal: React.FC<ProfileRankModalProps> = ({
           {tab === 'profile' ? (
             <div className="space-y-5">
               {/* Auth Card */}
-              <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-white/10 bg-[#0c3747] p-4">
-                <div>
-                  <div className="text-xs font-bold text-teal-300">
-                    {isSignedIn ? 'Google 계정 연동됨 (클라우드 개인정보 저장)' : '게스트 플레이 중'}
+              <div className="space-y-3 rounded-2xl border border-white/10 bg-[#0c3747] p-4">
+                <div className="flex flex-wrap items-center justify-between gap-4">
+                  <div>
+                    <div className="text-xs font-bold text-teal-300">
+                      {isSignedIn ? 'Google 계정 연동됨 (클라우드 개인정보 저장)' : '게스트 플레이 중'}
+                    </div>
+                    <div className="mt-0.5 text-sm font-bold text-white">
+                      {isSignedIn
+                        ? userEmail ?? profile.displayName
+                        : '로그인하면 승리 수가 개인정보에 저장되고 랭킹에 올릴 수 있습니다.'}
+                    </div>
                   </div>
-                  <div className="mt-0.5 text-sm font-bold text-white">
-                    {isSignedIn ? userEmail ?? profile.displayName : '로그인하면 승리 수가 개인정보에 저장되고 랭킹에 올릴 수 있습니다.'}
-                  </div>
+                  {isSignedIn ? (
+                    <button
+                      type="button"
+                      onClick={onSignOut}
+                      className="flex items-center gap-1.5 rounded-xl bg-slate-800 px-4 py-2 text-xs font-bold text-slate-200 hover:bg-slate-700 cursor-pointer"
+                    >
+                      <LogOut className="h-4 w-4" /> 로그아웃
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={signingIn}
+                      onClick={() => void handleSignInClick()}
+                      className="flex items-center gap-1.5 rounded-xl bg-amber-400 px-4 py-2.5 text-xs font-extrabold text-slate-950 hover:bg-amber-300 cursor-pointer disabled:opacity-60"
+                    >
+                      <LogIn className="h-4 w-4" /> {signingIn ? '로그인 창 여는 중...' : 'Google 로그인'}
+                    </button>
+                  )}
                 </div>
-                {isSignedIn ? (
-                  <button
-                    type="button"
-                    onClick={onSignOut}
-                    className="flex items-center gap-1.5 rounded-xl bg-slate-800 px-4 py-2 text-xs font-bold text-slate-200 hover:bg-slate-700 cursor-pointer"
-                  >
-                    <LogOut className="h-4 w-4" /> 로그아웃
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={onSignIn}
-                    className="flex items-center gap-1.5 rounded-xl bg-amber-400 px-4 py-2.5 text-xs font-extrabold text-slate-950 hover:bg-amber-300 cursor-pointer"
-                  >
-                    <LogIn className="h-4 w-4" /> Google 로그인
-                  </button>
-                )}
+
+                {authError ? (
+                  <div className="rounded-xl border border-rose-400/50 bg-rose-500/15 px-3.5 py-2.5 text-xs font-bold text-rose-200">
+                    {authError}
+                  </div>
+                ) : null}
+
+                {!isSignedIn && (showExternalHelp || isEmbeddedFrame()) && typeof window !== 'undefined' ? (
+                  <div className="rounded-xl border border-cyan-300/30 bg-slate-900/65 p-3 text-xs text-cyan-100">
+                    <div className="font-extrabold text-amber-200">
+                      로그인 화면이 안 뜨나요?
+                    </div>
+                    <p className="mt-0.5 text-[11px] text-slate-300">
+                      인앱 브라우저나 팝업 차단 환경에서는 Google 로그인이 차단될 수 있습니다. 새 탭(Chrome/Safari)에서 열어 로그인해 주세요.
+                    </p>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      <a
+                        href={window.location.href}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 rounded-lg bg-cyan-400 px-3 py-1.5 text-[11px] font-extrabold text-slate-950 hover:bg-cyan-300"
+                      >
+                        <ExternalLink className="h-3.5 w-3.5" /> 새 탭에서 열기
+                      </a>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void navigator.clipboard?.writeText(window.location.href);
+                          setUrlCopied(true);
+                          window.setTimeout(() => setUrlCopied(false), 1800);
+                        }}
+                        className="inline-flex items-center gap-1 rounded-lg bg-slate-800 px-3 py-1.5 text-[11px] font-bold text-slate-200 hover:bg-slate-700 cursor-pointer"
+                      >
+                        <Copy className="h-3.5 w-3.5" /> {urlCopied ? '복사됨!' : '주소 복사'}
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
               </div>
 
               {/* Nickname Editor */}
@@ -200,15 +272,17 @@ export const ProfileRankModal: React.FC<ProfileRankModalProps> = ({
                 </div>
                 <button
                   type="button"
-                  disabled={publishing}
-                  onClick={isSignedIn ? onPublishRank : onSignIn}
-                  className="rounded-xl bg-gradient-to-r from-amber-400 to-orange-400 px-5 py-2.5 text-xs font-extrabold text-slate-950 hover:from-amber-300 hover:to-orange-300 cursor-pointer"
+                  disabled={publishing || signingIn}
+                  onClick={isSignedIn ? onPublishRank : () => void handleSignInClick()}
+                  className="rounded-xl bg-gradient-to-r from-amber-400 to-orange-400 px-5 py-2.5 text-xs font-extrabold text-slate-950 hover:from-amber-300 hover:to-orange-300 cursor-pointer disabled:opacity-60"
                 >
                   {publishing
                     ? '등록 중...'
-                    : isSignedIn
-                    ? '랭킹에 승리 수 올리기'
-                    : '로그인 후 랭킹 등록'}
+                    : signingIn
+                      ? '로그인 중...'
+                      : isSignedIn
+                        ? '랭킹에 승리 수 올리기'
+                        : '로그인 후 랭킹 등록'}
                 </button>
               </div>
 

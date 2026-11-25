@@ -1,8 +1,10 @@
 import { initializeApp } from 'firebase/app';
 import {
   getAuth,
+  getRedirectResult,
   GoogleAuthProvider,
   signInWithPopup,
+  signInWithRedirect,
   signOut,
   User,
 } from 'firebase/auth';
@@ -105,9 +107,128 @@ async function testConnection() {
 }
 void testConnection();
 
+export class AuthSignInError extends Error {
+  code: string;
+  needsExternalBrowser: boolean;
+
+  constructor(message: string, code = 'auth/unknown', needsExternalBrowser = false) {
+    super(message);
+    this.name = 'AuthSignInError';
+    this.code = code;
+    this.needsExternalBrowser = needsExternalBrowser;
+  }
+}
+
+export function isInAppBrowser(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent || '';
+  return /KAKAOTALK|NAVER|Instagram|FBAN|FBAV|Line\/|DaumApps|everytimeApp/i.test(ua);
+}
+
+export function isEmbeddedFrame(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return window.self !== window.top;
+  } catch {
+    return true;
+  }
+}
+
+function extractAuthErrorCode(error: unknown): string {
+  if (error && typeof error === 'object' && 'code' in error) {
+    return String((error as { code?: unknown }).code ?? 'auth/unknown');
+  }
+  return 'auth/unknown';
+}
+
+function buildFriendlyAuthError(error: unknown): AuthSignInError {
+  if (error instanceof AuthSignInError) return error;
+  const code = extractAuthErrorCode(error);
+  const host = typeof window !== 'undefined' ? window.location.hostname : '';
+
+  if (code === 'auth/unauthorized-domain') {
+    return new AuthSignInError(
+      `현재 주소(${host || '현재 도메인'})가 Firebase 승인 도메인에 등록되어 있지 않아 로그인 창을 열 수 없습니다. Firebase Console → Authentication → Settings → 승인된 도메인에 "${host}"를 추가해 주세요.`,
+      code,
+      true,
+    );
+  }
+  if (code === 'auth/popup-blocked') {
+    return new AuthSignInError(
+      '브라우저에서 로그인 팝업이 차단되었습니다. 팝업 차단을 해제하거나 아래 "새 탭에서 열기"로 다시 로그인해 주세요.',
+      code,
+      true,
+    );
+  }
+  if (code === 'auth/operation-not-supported-in-this-environment') {
+    return new AuthSignInError(
+      '현재 브라우저/인앱 환경에서는 Google 로그인 팝업이 지원되지 않습니다. Chrome 또는 Safari 등 기본 브라우저로 열어 로그인해 주세요.',
+      code,
+      true,
+    );
+  }
+  if (code === 'auth/popup-closed-by-user') {
+    return new AuthSignInError(
+      '로그인 창이 완료되기 전에 닫혔습니다. 다시 시도해 주세요.',
+      code,
+      false,
+    );
+  }
+  if (code === 'auth/cancelled-popup-request') {
+    return new AuthSignInError(
+      '이미 진행 중인 로그인 요청이 있어 취소되었습니다. 잠시 후 다시 시도해 주세요.',
+      code,
+      false,
+    );
+  }
+  if (code === 'auth/network-request-failed') {
+    return new AuthSignInError(
+      '네트워크 연결 오류로 로그인에 실패했습니다. 인터넷 연결을 확인한 뒤 다시 시도해 주세요.',
+      code,
+      false,
+    );
+  }
+  const rawMsg = error instanceof Error ? error.message : String(error);
+  return new AuthSignInError(`Google 로그인에 실패했습니다. (${code}: ${rawMsg.slice(0, 80)})`, code, false);
+}
+
+export async function resolveRedirectSignIn(): Promise<User | null> {
+  try {
+    const res = await getRedirectResult(auth);
+    return res?.user ?? null;
+  } catch (error) {
+    throw buildFriendlyAuthError(error);
+  }
+}
+
 export async function signInWithGoogle(): Promise<User> {
-  const cred = await signInWithPopup(auth, googleProvider);
-  return cred.user;
+  if (isInAppBrowser()) {
+    throw new AuthSignInError(
+      '카카오톡·인스타그램 등 인앱 브라우저에서는 Google 로그인이 차단됩니다. 우측 메뉴(⋯)에서 "다른 브라우저로 열기(Chrome/Safari)" 또는 링크 복사로 열어주세요.',
+      'auth/in-app-browser',
+      true,
+    );
+  }
+
+  try {
+    const cred = await signInWithPopup(auth, googleProvider);
+    return cred.user;
+  } catch (error) {
+    const code = extractAuthErrorCode(error);
+    if (
+      (code === 'auth/popup-blocked' || code === 'auth/operation-not-supported-in-this-environment') &&
+      !isEmbeddedFrame()
+    ) {
+      // Fallback to redirect flow only when running in a top-level browser window
+      await signInWithRedirect(auth, googleProvider);
+      throw new AuthSignInError(
+        'Google 로그인 페이지로 이동합니다...',
+        'auth/redirect-started',
+        false,
+      );
+    }
+    throw buildFriendlyAuthError(error);
+  }
 }
 
 export async function signOutUser(): Promise<void> {
@@ -401,6 +522,40 @@ export class BattleRoomError extends Error {
   }
 }
 
+export function formatBattleErrorKo(err: unknown, fallback: string): string {
+  if (err instanceof BattleRoomError || err instanceof AuthSignInError) {
+    return err.message;
+  }
+  if (err instanceof Error) {
+    let rawError = err.message;
+    try {
+      const parsed = JSON.parse(err.message) as Partial<FirestoreErrorInfo>;
+      if (parsed && typeof parsed.error === 'string') {
+        rawError = parsed.error;
+      }
+    } catch {
+      // not JSON
+    }
+    const lower = rawError.toLowerCase();
+    if (lower.includes('missing or insufficient permissions') || lower.includes('permission-denied')) {
+      return '권한이 부족하거나 로그인 인증이 확인되지 않았습니다. 로그아웃 후 다시 Google 로그인해 주세요.';
+    }
+    if (lower.includes('quota exceeded')) {
+      return '오늘의 무료 서버 사용량을 초과했습니다. 내일 한도가 초기화됩니다.';
+    }
+    if (lower.includes('requires an index') || lower.includes('failed-precondition')) {
+      return '매칭 검색 인덱스를 준비 중입니다. 잠시 후 다시 시도하거나 방 코드 만들기를 이용해 주세요.';
+    }
+    if (lower.includes('offline') || lower.includes('unavailable') || lower.includes('network')) {
+      return '서버 연결이 원활하지 않습니다. 네트워크 연결을 확인한 뒤 다시 시도해 주세요.';
+    }
+    if (rawError) {
+      return `${fallback} (${rawError.slice(0, 90)})`;
+    }
+  }
+  return fallback;
+}
+
 const ROOM_CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
 export function normalizeRoomCode(raw: string): string {
@@ -571,8 +726,16 @@ export async function createBattleRoom(
   isMatchmaking: boolean,
   judgeId: string,
 ): Promise<BattleRoomData> {
-  const uid = auth.currentUser?.uid || profile.uid;
-  const hostSlot = buildPlayerSlotFromProfile({ ...profile, uid });
+  const currentUser = auth.currentUser;
+  if (!currentUser?.uid) {
+    throw new BattleRoomError('Google 로그인 세션이 확인되지 않습니다. 먼저 Google 로그인을 해주세요.');
+  }
+  const uid = currentUser.uid;
+  const hostSlot = buildPlayerSlotFromProfile({
+    ...profile,
+    uid,
+    displayName: profile.displayName || currentUser.displayName || '투발루 셰프',
+  });
   const emptyGuest = buildEmptyBattleSlot();
   const safeJudgeId = judgeId.trim().slice(0, 40) || 'judge_taupola';
 
@@ -677,7 +840,11 @@ export async function findOrCreateMatchmakingRoom(
   profile: UserProfileData,
   judgeId: string,
 ): Promise<{ room: BattleRoomData; role: 'host' | 'guest' }> {
-  const uid = auth.currentUser?.uid || profile.uid;
+  const currentUser = auth.currentUser;
+  if (!currentUser?.uid) {
+    throw new BattleRoomError('Google 로그인 세션이 확인되지 않습니다. 먼저 Google 로그인을 해주세요.');
+  }
+  const uid = currentUser.uid;
   const path = 'battleRooms';
 
   try {
@@ -685,7 +852,6 @@ export async function findOrCreateMatchmakingRoom(
       collection(db, 'battleRooms'),
       where('status', '==', 'waiting'),
       where('isMatchmaking', '==', true),
-      where('guestUid', '==', ''),
       limit(12),
     );
     const snap = await getDocs(q);
@@ -693,7 +859,7 @@ export async function findOrCreateMatchmakingRoom(
 
     const candidates = snap.docs
       .map((d) => parseBattleRoom(d.id, d.data()))
-      .filter((r) => r.hostUid !== uid && r.createdAtMs >= cutoffMs);
+      .filter((r) => r.guestUid === '' && r.hostUid !== uid && r.createdAtMs >= cutoffMs);
 
     for (const candidate of candidates) {
       try {
@@ -712,6 +878,11 @@ export async function findOrCreateMatchmakingRoom(
     return { room: created, role: 'host' };
   } catch (error) {
     if (error instanceof BattleRoomError) throw error;
+    const msg = error instanceof Error ? error.message.toLowerCase() : '';
+    if (msg.includes('requires an index') || msg.includes('failed-precondition')) {
+      const created = await createBattleRoom(profile, true, judgeId);
+      return { room: created, role: 'host' };
+    }
     handleFirestoreError(error, OperationType.LIST, path);
   }
 }

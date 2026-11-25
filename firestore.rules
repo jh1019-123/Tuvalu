@@ -340,8 +340,7 @@ service cloud.firestore {
 
       allow list: if isVerified()
         && existing().status == 'waiting'
-        && existing().isMatchmaking == true
-        && existing().guestUid == '';
+        && existing().isMatchmaking == true;
 
       allow create: if isVerified()
         && isValidRoomCode(roomId)

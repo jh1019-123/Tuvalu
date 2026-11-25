@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   Copy,
   DoorOpen,
+  ExternalLink,
   Flame,
   KeyRound,
   Loader2,
@@ -35,10 +36,13 @@ import {
   getJudgeNeedsForWeather,
 } from '../data/tuvaluData';
 import {
-  BattleRoomError,
+  AuthSignInError,
   cancelOrLeaveBattleRoom,
   createBattleRoom,
   findOrCreateMatchmakingRoom,
+  formatBattleErrorKo,
+  isEmbeddedFrame,
+  isInAppBrowser,
   joinBattleRoomByCode,
   normalizeRoomCode,
   subscribeBattleRoom,
@@ -102,6 +106,8 @@ export const RealtimeBattleModal: React.FC<RealtimeBattleModalProps> = ({
   const [signingIn, setSigningIn] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [urlCopied, setUrlCopied] = useState(false);
+  const [showExternalHelp, setShowExternalHelp] = useState(() => isInAppBrowser());
   const [showRecipeHints, setShowRecipeHints] = useState(false);
 
   // Dish Selection State inside Waiting / Prep Room
@@ -171,8 +177,8 @@ export const RealtimeBattleModal: React.FC<RealtimeBattleModalProps> = ({
           onBattleLaunchRef.current(latest, role, fish, selectedIngIdsRef.current);
         }
       },
-      () => {
-        setErrorMsg('실시간 방 연결 중 오류가 발생했습니다.');
+      (err) => {
+        setErrorMsg(formatBattleErrorKo(err, '실시간 방 연결 중 오류가 발생했습니다.'));
       },
     );
 
@@ -233,8 +239,15 @@ export const RealtimeBattleModal: React.FC<RealtimeBattleModalProps> = ({
     setErrorMsg(null);
     try {
       await onSignIn();
-    } catch {
-      setErrorMsg('Google 로그인에 실패했거나 창이 닫혔습니다.');
+    } catch (err) {
+      if (err instanceof AuthSignInError && err.code === 'auth/redirect-started') {
+        setErrorMsg(err.message);
+        return;
+      }
+      if (err instanceof AuthSignInError && err.needsExternalBrowser) {
+        setShowExternalHelp(true);
+      }
+      setErrorMsg(formatBattleErrorKo(err, 'Google 로그인에 실패했거나 창이 닫혔습니다.'));
     } finally {
       setSigningIn(false);
     }
@@ -254,7 +267,7 @@ export const RealtimeBattleModal: React.FC<RealtimeBattleModalProps> = ({
       setRole('host');
       onRoomBound(created, 'host');
     } catch (err) {
-      setErrorMsg(err instanceof BattleRoomError ? err.message : '방을 만드는 중 오류가 발생했습니다.');
+      setErrorMsg(formatBattleErrorKo(err, '방을 만드는 중 오류가 발생했습니다.'));
     } finally {
       setBusy(false);
     }
@@ -273,7 +286,7 @@ export const RealtimeBattleModal: React.FC<RealtimeBattleModalProps> = ({
       setRole('guest');
       onRoomBound(joined, 'guest');
     } catch (err) {
-      setErrorMsg(err instanceof BattleRoomError ? err.message : '방 참가 중 오류가 발생했습니다.');
+      setErrorMsg(formatBattleErrorKo(err, '방 참가 중 오류가 발생했습니다.'));
     } finally {
       setBusy(false);
     }
@@ -293,7 +306,7 @@ export const RealtimeBattleModal: React.FC<RealtimeBattleModalProps> = ({
       setRole(res.role);
       onRoomBound(res.room, res.role);
     } catch (err) {
-      setErrorMsg(err instanceof BattleRoomError ? err.message : '랜덤 매칭 중 오류가 발생했습니다.');
+      setErrorMsg(formatBattleErrorKo(err, '랜덤 매칭 중 오류가 발생했습니다.'));
     } finally {
       setBusy(false);
     }
@@ -314,7 +327,7 @@ export const RealtimeBattleModal: React.FC<RealtimeBattleModalProps> = ({
       });
       setRoom(updated);
     } catch (err) {
-      setErrorMsg(err instanceof BattleRoomError ? err.message : '준비 상태 저장에 실패했습니다.');
+      setErrorMsg(formatBattleErrorKo(err, '준비 상태 저장에 실패했습니다.'));
     } finally {
       setBusy(false);
     }
@@ -479,11 +492,43 @@ export const RealtimeBattleModal: React.FC<RealtimeBattleModalProps> = ({
                 type="button"
                 disabled={signingIn}
                 onClick={() => void handleGoogleSignIn()}
-                className="mt-4 inline-flex items-center gap-2 rounded-2xl bg-amber-400 px-6 py-3 text-sm font-extrabold text-slate-950 hover:bg-amber-300 cursor-pointer"
+                className="mt-4 inline-flex items-center gap-2 rounded-2xl bg-amber-400 px-6 py-3 text-sm font-extrabold text-slate-950 hover:bg-amber-300 cursor-pointer disabled:opacity-60"
               >
                 <LogIn className="h-4 w-4" />
-                {signingIn ? '로그인 중...' : 'Google 로그인 후 입장하기'}
+                {signingIn ? '로그인 창 여는 중...' : 'Google 로그인 후 입장하기'}
               </button>
+
+              {(showExternalHelp || isEmbeddedFrame()) && typeof window !== 'undefined' ? (
+                <div className="mt-4 rounded-xl border border-cyan-300/30 bg-slate-900/70 p-3.5 text-left text-xs text-cyan-100">
+                  <div className="font-extrabold text-amber-200">
+                    로그인 창이 열리지 않나요? (모바일·인앱 브라우저·팝업 차단)
+                  </div>
+                  <p className="mt-1 text-[11px] text-slate-300">
+                    카카오톡/인스타그램 인앱 브라우저나 팝업 차단 환경에서는 Google 로그인이 열리지 않을 수 있습니다. 아래 버튼으로 Chrome/Safari 새 탭에서 열어주세요.
+                  </p>
+                  <div className="mt-2.5 flex flex-wrap gap-2">
+                    <a
+                      href={window.location.href}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-cyan-400 px-3 py-1.5 text-xs font-extrabold text-slate-950 hover:bg-cyan-300"
+                    >
+                      <ExternalLink className="h-3.5 w-3.5" /> 새 탭/외부 브라우저로 열기
+                    </a>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void navigator.clipboard?.writeText(window.location.href);
+                        setUrlCopied(true);
+                        window.setTimeout(() => setUrlCopied(false), 1800);
+                      }}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-slate-800 px-3 py-1.5 text-xs font-bold text-slate-200 hover:bg-slate-700 cursor-pointer"
+                    >
+                      <Copy className="h-3.5 w-3.5" /> {urlCopied ? '주소 복사됨!' : '게임 주소 복사'}
+                    </button>
+                  </div>
+                </div>
+              ) : null}
             </div>
           ) : fishInventory.length === 0 && !room ? (
             /* No Fish Warning */

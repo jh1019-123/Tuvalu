@@ -58,8 +58,10 @@ import {
   auth,
   cancelOrLeaveBattleRoom,
   finalizeTimedOutRealtimeBattle,
+  formatBattleErrorKo,
   loadUserProfile,
   publishToLeaderboard,
+  resolveRedirectSignIn,
   saveUserProfile,
   signInWithGoogle,
   signOutUser,
@@ -318,6 +320,20 @@ function GameApp() {
   const authSyncPromiseRef = useRef<Promise<void>>(Promise.resolve());
 
   useEffect(() => {
+    void resolveRedirectSignIn()
+      .then((redirectUser) => {
+        if (redirectUser) {
+          setRankStatusMsg(`환영합니다, ${redirectUser.displayName ?? '셰프'}님! Google 로그인 완료되었습니다.`);
+          showToast('Google 로그인 완료! 승리 수가 저장됩니다.');
+        }
+      })
+      .catch((err) => {
+        console.error('Redirect sign-in error:', err);
+        const msg = formatBattleErrorKo(err, 'Google 로그인 처리 중 오류가 발생했습니다.');
+        setRankStatusMsg(msg);
+        showToast(msg);
+      });
+
     const unsub = onAuthStateChanged(auth, (user) => {
       setAuthUser(user);
       if (user) {
@@ -1367,7 +1383,10 @@ function GameApp() {
       showToast('Google 로그인 완료! 승리 수가 저장됩니다.');
     } catch (err) {
       console.error('Sign in failed:', err);
-      showToast('로그인 창이 닫혔거나 실패했습니다.');
+      const msg = formatBattleErrorKo(err, '로그인 창이 닫혔거나 실패했습니다.');
+      setRankStatusMsg(msg);
+      showToast(msg);
+      throw err;
     }
   }, [showToast]);
 
@@ -1389,7 +1408,11 @@ function GameApp() {
 
   const handlePublishRank = useCallback(async () => {
     if (!authUser) {
-      await handleSignIn();
+      try {
+        await handleSignIn();
+      } catch {
+        // handled by handleSignIn / modal error state
+      }
       return;
     }
     setPublishingRank(true);
@@ -1404,9 +1427,9 @@ function GameApp() {
       showToast('투발루 셰프 랭킹에 승리 수가 등록되었습니다!');
     } catch (err) {
       console.error('Publish rank failed:', err);
-      const detail = err instanceof Error ? err.message : String(err);
-      setRankStatusMsg('랭킹 등록 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.');
-      showToast(`랭킹 등록 실패: ${detail.slice(0, 60)}`);
+      const detail = formatBattleErrorKo(err, '랭킹 등록 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.');
+      setRankStatusMsg(detail);
+      showToast(detail);
     } finally {
       setPublishingRank(false);
     }
@@ -1431,7 +1454,9 @@ function GameApp() {
       showToast('로그인 및 투발루 랭킹 등록 완료!');
     } catch (err) {
       console.error('Sign in and publish failed:', err);
-      showToast('로그인 또는 랭킹 등록 중 오류가 발생했습니다.');
+      const msg = formatBattleErrorKo(err, '로그인 또는 랭킹 등록 중 오류가 발생했습니다.');
+      setRankStatusMsg(msg);
+      showToast(msg);
     } finally {
       setPublishingRank(false);
     }
@@ -1550,6 +1575,13 @@ function GameApp() {
             setActiveModal('profile');
           }}
         />
+      ) : null}
+
+      {/* Global Top-Layer Toast Notification (visible above modals) */}
+      {toast ? (
+        <div className="pointer-events-none fixed top-4 left-1/2 z-50 max-w-[92vw] -translate-x-1/2 rounded-2xl border border-amber-300/60 bg-[#072633]/95 px-5 py-2.5 text-center text-xs font-bold text-amber-200 shadow-2xl">
+          {toast}
+        </div>
       ) : null}
 
       {/* Playing HUD (Low-occlusion, pointer-events-none wrapper) */}
@@ -1688,13 +1720,6 @@ function GameApp() {
               </button>
             </div>
           </div>
-
-          {/* Toast Notification */}
-          {toast ? (
-            <div className="self-center rounded-full border border-amber-300/50 bg-[#072633]/95 px-5 py-2 text-center text-xs font-bold text-amber-200 shadow-xl">
-              {toast}
-            </div>
-          ) : null}
 
           {/* Outer Island Rare Ingredient Cooldown Status Pill */}
           {screen === 'playing' && zone === 'island' && !activeGather ? (
@@ -2078,7 +2103,7 @@ function GameApp() {
           publishing={publishingRank}
           statusMessage={rankStatusMsg}
           onUpdateDisplayName={(n) => void handleUpdateDisplayName(n)}
-          onSignIn={() => void handleSignIn()}
+          onSignIn={handleSignIn}
           onSignOut={() => void handleSignOut()}
           onPublishRank={() => void handlePublishRank()}
           onClose={() => setActiveModal('none')}
