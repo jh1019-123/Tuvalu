@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Check, Flame, SkipForward, Sparkles, Utensils, Wind } from 'lucide-react';
+import { Bug, Check, Flame, ShieldAlert, SkipForward, Sparkles, Utensils, Wind } from 'lucide-react';
 import { soundEngine } from '../audio/soundEngine';
 import { FISH_TIERS, INGREDIENT_CATALOG } from '../data/tuvaluData';
 import {
@@ -21,6 +21,7 @@ interface CookingMinigameHUDProps {
   onPotDrop: (colorHex: number, kind: 'fish' | 'meat' | 'vegetable' | 'salt' | 'spice') => void;
   onFanStroke: () => void;
   onHeatChange: (heat: number) => void;
+  onPestReport?: (swatted: number, missed: number) => void;
   onStageComplete: (stage: 'wash' | 'prep' | 'cook', score: number) => void;
   scores: CookingStageScores;
 }
@@ -49,6 +50,19 @@ interface CutsceneItem {
   kind: 'fish' | 'meat' | 'vegetable' | 'salt' | 'spice';
 }
 
+interface FlyingPest {
+  id: number;
+  labelKo: string;
+  startX: number;
+  startY: number;
+  x: number;
+  y: number;
+  progress: number; // 0..1 toward dish
+  speed: number;
+  wobblePhase: number;
+}
+
+const PEST_TYPES = ['라군 날파리', '코코넛 초파리', '바다 모기'];
 const FAN_DURATION_MS = 10000;
 const FAN_TARGET_FOR_100 = 45;
 
@@ -60,6 +74,7 @@ export const CookingMinigameHUD: React.FC<CookingMinigameHUDProps> = ({
   onPotDrop,
   onFanStroke,
   onHeatChange,
+  onPestReport,
   onStageComplete,
   scores,
 }) => {
@@ -72,8 +87,37 @@ export const CookingMinigameHUD: React.FC<CookingMinigameHUDProps> = ({
   onFanStrokeRef.current = onFanStroke;
   const onHeatChangeRef = useRef(onHeatChange);
   onHeatChangeRef.current = onHeatChange;
+  const onPestReportRef = useRef(onPestReport);
+  onPestReportRef.current = onPestReport;
   const onStageCompleteRef = useRef(onStageComplete);
   onStageCompleteRef.current = onStageComplete;
+
+  // Pick a random stage for pest defense per battle
+  const pestTargetStage = useMemo<'wash' | 'prep' | 'cook'>(() => {
+    const stages: ('wash' | 'prep' | 'cook')[] = ['wash', 'prep', 'cook'];
+    return stages[Math.floor(Math.random() * stages.length)];
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [plan.fish.uid, plan.fishSpecies.id]);
+
+  const [activePests, setActivePests] = useState<FlyingPest[]>([]);
+  const [pestFeedback, setPestFeedback] = useState<string | null>(null);
+  const pestStatsRef = useRef({ swatted: 0, missed: 0 });
+  const [pestStats, setPestStats] = useState({ swatted: 0, missed: 0 });
+
+  useEffect(() => {
+    pestStatsRef.current = { swatted: 0, missed: 0 };
+    setPestStats({ swatted: 0, missed: 0 });
+    setActivePests([]);
+    setPestFeedback(null);
+  }, [plan.fish.uid, plan.fishSpecies.id]);
+
+  const applyPestHygieneScore = (baseScore: number, currentStage: 'wash' | 'prep' | 'cook') => {
+    if (currentStage !== pestTargetStage) return baseScore;
+    const { swatted, missed } = pestStatsRef.current;
+    const bonus = swatted > 0 && missed === 0 ? 5 : 0;
+    const penalty = missed * 7;
+    return Math.max(15, Math.min(100, baseScore + bonus - penalty));
+  };
 
   // === STAGE 1: WASHING STATE ===
   const [spots, setSpots] = useState<DirtSpot[]>([]);
@@ -134,7 +178,8 @@ export const CookingMinigameHUD: React.FC<CookingMinigameHUDProps> = ({
     if (washCleanAvg >= 100 || washTimeLeft === 0) {
       washCompletedRef.current = true;
       const bonus = washCleanAvg >= 100 ? Math.min(10, Math.round(washTimeLeft * 0.8)) : 0;
-      const finalScore = Math.min(100, Math.max(25, washCleanAvg + bonus));
+      const baseScore = Math.min(100, Math.max(25, washCleanAvg + bonus));
+      const finalScore = applyPestHygieneScore(baseScore, 'wash');
       washFinishTimerRef.current = window.setTimeout(() => {
         washFinishTimerRef.current = null;
         onStageCompleteRef.current('wash', finalScore);
@@ -235,7 +280,8 @@ export const CookingMinigameHUD: React.FC<CookingMinigameHUDProps> = ({
       const avg = Math.round(
         cutScoresRef.current.reduce((a, b) => a + b, 0) / cutScoresRef.current.length,
       );
-      window.setTimeout(() => onStageCompleteRef.current('prep', avg), 500);
+      const finalScore = applyPestHygieneScore(avg, 'prep');
+      window.setTimeout(() => onStageCompleteRef.current('prep', finalScore), 500);
     }
   };
 
@@ -342,10 +388,11 @@ export const CookingMinigameHUD: React.FC<CookingMinigameHUDProps> = ({
         fanCompletedRef.current = true;
         clearInterval(iv);
         setFanFinished(true);
-        const finalScore = Math.min(
+        const baseScore = Math.min(
           100,
           Math.max(25, Math.round(25 + (fanCountRef.current / FAN_TARGET_FOR_100) * 75)),
         );
+        const finalScore = applyPestHygieneScore(baseScore, 'cook');
         window.setTimeout(() => {
           onStageCompleteRef.current('cook', finalScore);
         }, 550);
@@ -382,6 +429,102 @@ export const CookingMinigameHUD: React.FC<CookingMinigameHUDProps> = ({
     window.addEventListener('keydown', onDown);
     return () => window.removeEventListener('keydown', onDown);
   });
+
+  // === RANDOM-STAGE FLYING PEST DEFENSE WAVE ===
+  const pestWaveActive =
+    stage === pestTargetStage &&
+    (stage === 'wash' || stage === 'prep' || (stage === 'cook' && cookPhase === 'fan'));
+
+  useEffect(() => {
+    if (!pestWaveActive) {
+      setActivePests([]);
+      return;
+    }
+
+    const spawnDelays = [950, 2400, 3900];
+    const timers: number[] = [];
+
+    spawnDelays.forEach((delay, i) => {
+      const t = window.setTimeout(() => {
+        const edgeSide = i % 3;
+        const startX = edgeSide === 0 ? 8 + Math.random() * 18 : edgeSide === 1 ? 74 + Math.random() * 18 : 20 + Math.random() * 60;
+        const startY = edgeSide === 2 ? 6 : 12 + Math.random() * 25;
+        const pest: FlyingPest = {
+          id: Date.now() + i * 17,
+          labelKo: PEST_TYPES[Math.floor(Math.random() * PEST_TYPES.length)],
+          startX,
+          startY,
+          x: startX,
+          y: startY,
+          progress: 0,
+          speed: 0.23 + Math.random() * 0.05, // ~3.8 - 4.3s to reach dish
+          wobblePhase: Math.random() * Math.PI * 2,
+        };
+        setActivePests((prev) => [...prev, pest]);
+      }, delay);
+      timers.push(t);
+    });
+
+    let rafId = 0;
+    let lastTime = performance.now();
+
+    const animatePests = (now: number) => {
+      const dt = Math.min((now - lastTime) / 1000, 0.05);
+      lastTime = now;
+
+      let landedCount = 0;
+      setActivePests((prev) => {
+        if (prev.length === 0) return prev;
+        const next: FlyingPest[] = [];
+        for (const p of prev) {
+          const np = p.progress + p.speed * dt;
+          if (np >= 1) {
+            landedCount += 1;
+            continue;
+          }
+          const wobble = Math.sin(now * 0.008 + p.wobblePhase) * (1 - np) * 11;
+          const nx = Math.max(8, Math.min(92, p.startX + (50 - p.startX) * np + wobble));
+          const ny = Math.max(8, Math.min(86, p.startY + (64 - p.startY) * np + Math.cos(now * 0.01 + p.wobblePhase) * 5));
+          next.push({ ...p, progress: np, x: nx, y: ny });
+        }
+        return next;
+      });
+
+      if (landedCount > 0) {
+        soundEngine.playPestLand();
+        pestStatsRef.current.missed += landedCount;
+        const snapshot = { ...pestStatsRef.current };
+        setPestStats(snapshot);
+        onPestReportRef.current?.(snapshot.swatted, snapshot.missed);
+        setPestFeedback('으악! 날파리가 음식에 앉았습니다! (-7점)');
+        window.setTimeout(() => setPestFeedback(null), 1500);
+      }
+
+      rafId = requestAnimationFrame(animatePests);
+    };
+
+    rafId = requestAnimationFrame(animatePests);
+
+    return () => {
+      timers.forEach((id) => clearTimeout(id));
+      cancelAnimationFrame(rafId);
+      setActivePests([]);
+    };
+  }, [pestWaveActive]);
+
+  const handleSwatPest = (pestId: number, e: React.PointerEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setActivePests((prev) => prev.filter((p) => p.id !== pestId));
+    soundEngine.playSwat();
+    pestStatsRef.current.swatted += 1;
+    const snapshot = { ...pestStatsRef.current };
+    setPestStats(snapshot);
+    onPestReportRef.current?.(snapshot.swatted, snapshot.missed);
+    onStageBurstRef.current(stage as 'wash' | 'prep' | 'cook', 0xfef08a);
+    setPestFeedback('짝! 날파리 방해 퇴치 성공!');
+    window.setTimeout(() => setPestFeedback(null), 1100);
+  };
 
   if (stage !== 'wash' && stage !== 'prep' && stage !== 'cook') return null;
 
@@ -440,7 +583,47 @@ export const CookingMinigameHUD: React.FC<CookingMinigameHUDProps> = ({
       ) : null}
 
       <div className="pointer-events-none fixed inset-x-0 bottom-5 z-30 flex justify-center px-4">
-        <div className="pointer-events-auto w-full max-w-xl rounded-3xl border border-amber-300/45 bg-[#072633]/94 p-5 shadow-2xl">
+        <div className="pointer-events-auto relative w-full max-w-xl rounded-3xl border border-amber-300/45 bg-[#072633]/94 p-5 shadow-2xl">
+          {/* Interactive Flying Pest Defense Layer */}
+          {activePests.length > 0 ? (
+            <div className="pointer-events-none absolute inset-0 z-20 overflow-visible">
+              {activePests.map((pest) => {
+                const urgent = pest.progress > 0.65;
+                return (
+                  <button
+                    key={pest.id}
+                    type="button"
+                    onPointerDown={(e) => handleSwatPest(pest.id, e)}
+                    style={{ left: `${pest.x}%`, top: `${pest.y}%` }}
+                    className={`pointer-events-auto absolute -translate-x-1/2 -translate-y-1/2 flex min-h-[48px] min-w-[48px] flex-col items-center justify-center rounded-full border-2 px-2 py-1 shadow-xl transition-transform active:scale-90 cursor-pointer ${
+                      urgent
+                        ? 'animate-pulse border-rose-400 bg-rose-600/95 text-white'
+                        : 'border-amber-300 bg-slate-900/95 text-amber-200 hover:bg-amber-400 hover:text-slate-950'
+                    }`}
+                  >
+                    <Bug className="h-5 w-5" />
+                    <span className="whitespace-nowrap text-[9px] font-black leading-none">
+                      {pest.labelKo} 쫓기!
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          ) : null}
+
+          {/* Pest Alert Banner */}
+          {pestWaveActive && (activePests.length > 0 || pestFeedback) ? (
+            <div className="mb-3 flex items-center justify-between gap-2 rounded-xl border border-rose-400/50 bg-rose-500/20 px-3 py-1.5 text-xs font-extrabold text-rose-100">
+              <span className="flex items-center gap-1.5">
+                <ShieldAlert className="h-4 w-4 shrink-0 text-amber-300" />
+                {pestFeedback || '날파리가 날아옵니다! 터치/클릭해서 쫓아내세요!'}
+              </span>
+              <span className="tabular-nums text-[11px] text-amber-200">
+                퇴치 {pestStats.swatted} · 허용 {pestStats.missed}
+              </span>
+            </div>
+          ) : null}
+
         {/* Progress Header */}
         <div className="flex items-center justify-between border-b border-white/10 pb-3">
           <div className="flex items-center gap-2 text-xs font-extrabold">

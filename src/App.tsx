@@ -27,7 +27,7 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import { FishDexModal } from './components/FishDexModal';
 import { FishingHUD } from './components/FishingHUD';
 import { GatherMinigameHUD } from './components/GatherMinigameHUD';
-import { JudgingOverlay } from './components/JudgingOverlay';
+import { JudgingOverlay, JudgingPreviewCue } from './components/JudgingOverlay';
 import { MarketModal } from './components/MarketModal';
 import { MobileJoystick } from './components/MobileJoystick';
 import { ProfileRankModal } from './components/ProfileRankModal';
@@ -38,12 +38,20 @@ import {
   FISHING_DIFFICULTY_BY_TIER,
   FISH_CATALOG,
   FISH_TIERS,
+  FLAVOR_LABELS,
+  HIDDEN_RECIPES,
   INGREDIENT_CATALOG,
   OUTER_ISLANDS,
   RIVAL_CHEFS,
   TIER_ORDER,
   TUVALU_JUDGES,
   TUVALU_TIPS,
+  computeFishFreshness,
+  findMatchingHiddenRecipe,
+  getCurrentLagoonWeather,
+  getFreshnessFromPercent,
+  getJudgeNeedsForWeather,
+  pickJudgeEvaluationLines,
   rollRandomFish,
 } from './data/tuvaluData';
 import {
@@ -93,12 +101,20 @@ interface FishDexRecord {
   maxWeight: number;
 }
 
+function formatClockMmSs(ms: number): string {
+  const totalSec = Math.max(0, Math.ceil(ms / 1000));
+  const min = Math.floor(totalSec / 60);
+  const sec = totalSec % 60;
+  return `${min}:${sec.toString().padStart(2, '0')}`;
+}
+
 function loadLocalInventory(): {
   fishInventory: CaughtFish[];
   pantry: Record<string, number>;
   gatherCooldowns: Record<string, number>;
   caughtSpeciesIds: string[];
   fishDexRecords: Record<string, FishDexRecord>;
+  discoveredRecipeIds: string[];
   guestProfile: UserProfileData;
 } {
   try {
@@ -113,6 +129,7 @@ function loadLocalInventory(): {
         caughtSpeciesIds: Array.isArray(parsed.caughtSpeciesIds) ? parsed.caughtSpeciesIds : [],
         fishDexRecords:
           parsed.fishDexRecords && typeof parsed.fishDexRecords === 'object' ? parsed.fishDexRecords : {},
+        discoveredRecipeIds: Array.isArray(parsed.discoveredRecipeIds) ? parsed.discoveredRecipeIds : [],
         guestProfile: parsed.guestProfile ?? {
           uid: 'guest',
           displayName: '푸나푸티 셰프',
@@ -135,6 +152,7 @@ function loadLocalInventory(): {
     gatherCooldowns: {},
     caughtSpeciesIds: [],
     fishDexRecords: {},
+    discoveredRecipeIds: [],
     guestProfile: {
       uid: 'guest',
       displayName: '푸나푸티 셰프',
@@ -201,6 +219,12 @@ function GameApp() {
   const [fishDexRecords, setFishDexRecords] = useState<Record<string, FishDexRecord>>(
     initialData.current.fishDexRecords,
   );
+  const [discoveredRecipeIds, setDiscoveredRecipeIds] = useState<string[]>(
+    initialData.current.discoveredRecipeIds,
+  );
+  const discoveredRecipeIdsRef = useRef<string[]>(discoveredRecipeIds);
+  discoveredRecipeIdsRef.current = discoveredRecipeIds;
+  const [dexInitialTab, setDexInitialTab] = useState<'fish' | 'recipes'>('fish');
 
   // Fishing State
   const [fishingPhase, setFishingPhase] = useState<FishingPhase>('idle');
@@ -221,7 +245,11 @@ function GameApp() {
   const [cookingStage, setCookingStage] = useState<CookingStage>('none');
   const [stageScores, setStageScores] = useState<CookingStageScores>({ wash: 0, prep: 0, cook: 0 });
   const [verdict, setVerdict] = useState<BattleVerdict | null>(null);
+  const [judgingCue, setJudgingCue] = useState<JudgingPreviewCue | null>(null);
   const [rankPublishedThisBattle, setRankPublishedThisBattle] = useState(false);
+  const aiJudgingTimerRef = useRef<number | null>(null);
+  const pendingSkipActionRef = useRef<(() => void) | null>(null);
+  const pestStatsRef = useRef<{ swatted: number; missed: number }>({ swatted: 0, missed: 0 });
 
   // Real-Time Multiplayer Battle State
   const [realtimeRoom, setRealtimeRoom] = useState<BattleRoomData | null>(null);
@@ -247,7 +275,7 @@ function GameApp() {
     return () => clearTimeout(t);
   }, [toast]);
 
-  // Cooldown 1s clock & 3D node sync
+  // 1s Clock for weather atmosphere, fish freshness decay & gather cooldown nodes
   useEffect(() => {
     const syncNodes = () => {
       const t = Date.now();
@@ -257,15 +285,14 @@ function GameApp() {
         if (until > t) map[id] = true;
       });
       worldRef.current?.setGatherCooldowns(map);
+      worldRef.current?.setWeather(getCurrentLagoonWeather(t).weather);
     };
     syncNodes();
-    const hasActiveCd = Object.values(gatherCooldowns).some((until) => until > Date.now());
-    if (!hasActiveCd && zone !== 'island') return;
     const iv = window.setInterval(syncNodes, 1000);
     return () => clearInterval(iv);
-  }, [gatherCooldowns, zone]);
+  }, [gatherCooldowns]);
 
-  // Persist local inventory, cooldowns & guest state
+  // Persist local inventory, cooldowns, discovered recipes & guest state
   useEffect(() => {
     try {
       localStorage.setItem(
@@ -276,13 +303,14 @@ function GameApp() {
           gatherCooldowns,
           caughtSpeciesIds,
           fishDexRecords,
+          discoveredRecipeIds,
           guestProfile: profile,
         }),
       );
     } catch {
       // ignore storage quota
     }
-  }, [fishInventory, pantry, gatherCooldowns, caughtSpeciesIds, fishDexRecords, profile]);
+  }, [fishInventory, pantry, gatherCooldowns, caughtSpeciesIds, fishDexRecords, discoveredRecipeIds, profile]);
 
   // Firebase Auth listener (serialized via authSyncPromiseRef to prevent signIn+publish races)
   const profileRef = useRef(profile);
@@ -542,10 +570,13 @@ function GameApp() {
       },
     });
     worldRef.current = world;
+    world.setWeather(getCurrentLagoonWeather(Date.now()).weather);
 
     return () => {
       if (biteTimerRef.current) clearTimeout(biteTimerRef.current);
       if (missTimerRef.current) clearTimeout(missTimerRef.current);
+      if (aiJudgingTimerRef.current) clearTimeout(aiJudgingTimerRef.current);
+      if (realtimeJudgingTimerRef.current) clearTimeout(realtimeJudgingTimerRef.current);
       world.dispose();
       worldRef.current = null;
     };
@@ -675,41 +706,107 @@ function GameApp() {
     [profile.coins, showToast, syncProfileToCloud],
   );
 
+  const unlockHiddenRecipeIfMatched = useCallback((recipeId: string): boolean => {
+    if (discoveredRecipeIdsRef.current.includes(recipeId)) return false;
+    const next = [...discoveredRecipeIdsRef.current, recipeId];
+    discoveredRecipeIdsRef.current = next;
+    setDiscoveredRecipeIds(next);
+    return true;
+  }, []);
+
   const computePlayerDishMetrics = useCallback(
     (plan: BattlePlan, finalScores: CookingStageScores) => {
       const minigameAvg = finalScores.wash * 0.25 + finalScores.prep * 0.35 + finalScores.cook * 0.4;
       const tierBonus = FISH_TIERS[plan.fishSpecies.tier].dishQualityBonus;
-      const playerPerfection = Math.min(100, Math.round(minigameAvg * 0.72 + tierBonus));
+      const freshInfo = getFreshnessFromPercent(plan.fishFreshnessPct);
+      const weatherNeeds = getJudgeNeedsForWeather(plan.judge, plan.weather);
+      const matchedRecipe = findMatchingHiddenRecipe(plan.fishSpecies.tier, plan.ingredientIds);
+      const pestMissed = plan.pestMissed ?? pestStatsRef.current.missed;
+      const pestSwatted = plan.pestSwatted ?? pestStatsRef.current.swatted;
+      const pestPerfDelta = pestMissed > 0 ? -(pestMissed * 7) : pestSwatted > 0 ? 5 : 0;
+      const recipePerfBonus = matchedRecipe ? matchedRecipe.bonusPerfection : 0;
 
-      let palate = 35;
+      const playerPerfection = Math.max(
+        10,
+        Math.min(
+          100,
+          Math.round(minigameAvg * 0.68 + tierBonus + freshInfo.perfectionDelta + pestPerfDelta + recipePerfBonus),
+        ),
+      );
+
+      let palate = 32;
+      let weatherMatchedCount = 0;
       plan.fishSpecies.flavorTags.forEach((tag) => {
-        if (plan.judge.preferredFlavors.includes(tag)) palate += 12;
+        if (weatherNeeds.effectiveFlavors.includes(tag)) palate += 11;
+        if (tag === weatherNeeds.weatherBoostFlavor) {
+          palate += 4;
+          weatherMatchedCount += 1;
+        }
       });
       plan.ingredientIds.forEach((id) => {
         const ing = INGREDIENT_CATALOG.find((i) => i.id === id);
         if (!ing) return;
-        palate += Math.round(ing.palateBonus * 0.65);
+        palate += Math.round(ing.palateBonus * 0.62);
         ing.flavorTags.forEach((t) => {
-          if (plan.judge.preferredFlavors.includes(t)) palate += 9;
+          if (weatherNeeds.effectiveFlavors.includes(t)) palate += 8;
+          if (t === weatherNeeds.weatherBoostFlavor) {
+            palate += 4;
+            weatherMatchedCount += 1;
+          }
         });
       });
       if (TIER_ORDER[plan.fishSpecies.tier] >= TIER_ORDER[plan.judge.preferredTierMin]) {
         palate += 8;
       }
-      const playerPalateMatch = Math.min(100, palate);
+      palate += freshInfo.palateDelta;
+      if (matchedRecipe) palate += matchedRecipe.bonusPalate;
+
+      const playerPalateMatch = Math.max(10, Math.min(100, Math.round(palate)));
       const playerTotal = playerPerfection + playerPalateMatch;
-      const dishNameKo = `${plan.fishSpecies.nameKo} 투발루 로로 스페셜`;
-      return { playerPerfection, playerPalateMatch, playerTotal, dishNameKo };
+      const dishNameKo = (
+        matchedRecipe ? matchedRecipe.dishTitleKo : `${plan.fishSpecies.nameKo} 투발루 로로 스페셜`
+      ).slice(0, 80);
+
+      return {
+        playerPerfection,
+        playerPalateMatch,
+        playerTotal,
+        dishNameKo,
+        matchedRecipe,
+        freshInfo,
+        weatherMatched: weatherMatchedCount > 0,
+        pestMissed,
+      };
     },
     [],
   );
 
   // Start Cooking Battle (shared by AI & Real-Time PvP)
   const handleStartBattle = useCallback((plan: BattlePlan) => {
-    setFishInventory((prev) => prev.filter((f) => f.uid !== plan.fish.uid));
+    if (aiJudgingTimerRef.current) {
+      clearTimeout(aiJudgingTimerRef.current);
+      aiJudgingTimerRef.current = null;
+    }
+    if (realtimeJudgingTimerRef.current) {
+      clearTimeout(realtimeJudgingTimerRef.current);
+      realtimeJudgingTimerRef.current = null;
+    }
+    pendingSkipActionRef.current = null;
+    pestStatsRef.current = { swatted: 0, missed: 0 };
+
+    const normalizedPlan: BattlePlan = {
+      ...plan,
+      weather: plan.weather ?? getCurrentLagoonWeather(Date.now()).weather,
+      fishFreshnessPct:
+        typeof plan.fishFreshnessPct === 'number'
+          ? plan.fishFreshnessPct
+          : computeFishFreshness(plan.fish.caughtAt, Date.now()).percent,
+    };
+
+    setFishInventory((prev) => prev.filter((f) => f.uid !== normalizedPlan.fish.uid));
     setPantry((prev) => {
       const next = { ...prev };
-      plan.ingredientIds.forEach((id) => {
+      normalizedPlan.ingredientIds.forEach((id) => {
         if ((next[id] ?? 0) > 0) next[id] = next[id] - 1;
       });
       return next;
@@ -720,13 +817,20 @@ function GameApp() {
     setCurrentIslandId('funafuti');
     setZone('kitchen');
     worldRef.current?.setZone('kitchen');
-    setBattlePlan(plan);
+    setBattlePlan(normalizedPlan);
     setStageScores({ wash: 0, prep: 0, cook: 0 });
     setVerdict(null);
+    setJudgingCue(null);
     setRankPublishedThisBattle(false);
     realtimeVerdictDoneRef.current = false;
     setCookingStage('intro');
-    worldRef.current?.setCookingStage('intro', plan.fishSpecies, 0.5, plan.ingredientIds, plan.rival);
+    worldRef.current?.setCookingStage(
+      'intro',
+      normalizedPlan.fishSpecies,
+      0.5,
+      normalizedPlan.ingredientIds,
+      normalizedPlan.rival,
+    );
     soundEngine.playClick();
   }, []);
 
@@ -737,6 +841,7 @@ function GameApp() {
       fish: CaughtFish,
       ingredientIds: string[],
     ) => {
+      const now = Date.now();
       const species = FISH_CATALOG.find((f) => f.id === fish.speciesId) ?? FISH_CATALOG[0];
       const judge = TUVALU_JUDGES.find((j) => j.id === room.judgeId) ?? TUVALU_JUDGES[0];
       const oppSlot = role === 'host' ? room.guest : room.host;
@@ -761,16 +866,15 @@ function GameApp() {
         ingredientIds,
         judge,
         rival: synthRival,
+        weather: getCurrentLagoonWeather(now).weather,
+        fishFreshnessPct: computeFishFreshness(fish.caughtAt, now).percent,
       });
     },
     [handleStartBattle],
   );
 
-  const finalizeRealtimeVerdict = useCallback(
+  const buildRealtimeVerdictPayload = useCallback(
     (finishedRoom: BattleRoomData, role: 'host' | 'guest', plan: BattlePlan) => {
-      if (realtimeVerdictDoneRef.current) return;
-      realtimeVerdictDoneRef.current = true;
-
       const selfSlot = role === 'host' ? finishedRoom.host : finishedRoom.guest;
       const oppSlot = role === 'host' ? finishedRoom.guest : finishedRoom.host;
 
@@ -786,14 +890,38 @@ function GameApp() {
       const rewardCoins = won ? 160 + Math.round(playerTotal * 0.45) : isDraw ? 90 : 40;
       const dishNameKo = selfSlot.dishNameKo || `${plan.fishSpecies.nameKo} 투발루 로로 스페셜`;
 
-      let judgeCommentKo = '';
-      if (won) {
-        judgeCommentKo = `대단한 승부였소! ${selfSlot.displayName}님의 ${plan.fishSpecies.nameKo} 요리가 ${oppSlot.displayName}님의 요리를 제치고 오늘의 최고 만찬으로 뽑혔네!`;
-      } else if (isDraw) {
-        judgeCommentKo = `우열을 가릴 수 없는 완벽한 동점이로군! ${selfSlot.displayName}님과 ${oppSlot.displayName}님 모두 투발루 최고의 셰프답소!`;
-      } else {
-        judgeCommentKo = `이번 대결은 ${oppSlot.displayName}님의 요리가 한 끗 더 빛났네! 다음 실시간 매치에서 설욕해보게나!`;
-      }
+      const freshInfo = getFreshnessFromPercent(plan.fishFreshnessPct);
+      const matchedRecipe = findMatchingHiddenRecipe(plan.fishSpecies.tier, plan.ingredientIds);
+      const isNewlyUnlockedRecipe = matchedRecipe ? unlockHiddenRecipeIfMatched(matchedRecipe.id) : false;
+      const weatherNeeds = getJudgeNeedsForWeather(plan.judge, plan.weather);
+      const weatherMatched =
+        plan.fishSpecies.flavorTags.includes(weatherNeeds.weatherBoostFlavor) ||
+        plan.ingredientIds.some((id) =>
+          INGREDIENT_CATALOG.find((i) => i.id === id)?.flavorTags.includes(weatherNeeds.weatherBoostFlavor),
+        );
+      const pestMissed = plan.pestMissed ?? pestStatsRef.current.missed;
+      const scoreMargin = playerTotal - rivalTotal;
+
+      const lines = pickJudgeEvaluationLines({
+        judgeNameKo: plan.judge.nameKo,
+        fishNameKo: plan.fishSpecies.nameKo,
+        weatherId: plan.weather,
+        weatherMatched,
+        freshnessGrade: freshInfo.grade,
+        hiddenRecipe: matchedRecipe,
+        isNewRecipe: isNewlyUnlockedRecipe,
+        pestMissed,
+        won,
+        isDraw,
+        scoreMargin,
+      });
+
+      const tone: JudgingPreviewCue['tone'] =
+        won || isNewlyUnlockedRecipe
+          ? 'impressed'
+          : !isDraw && (freshInfo.grade === 'stale' || pestMissed > 0 || scoreMargin <= -15)
+            ? 'critical'
+            : 'good';
 
       const oppSpecies = FISH_CATALOG.find((f) => f.id === oppSlot.fishSpeciesId) ?? plan.fishSpecies;
       const updatedRival: RivalChef = {
@@ -816,9 +944,37 @@ function GameApp() {
         won,
         isDraw,
         rewardCoins,
-        judgeCommentKo,
+        judgeCommentKo: lines.verdictLineKo,
+        judgeTastingLineKo: lines.tastingLineKo,
         dishNameKo,
+        unlockedRecipe: matchedRecipe,
+        isNewlyUnlockedRecipe,
+        freshnessInfo: freshInfo,
+        weatherId: plan.weather,
       };
+
+      return {
+        nextVerdict,
+        updatedPlan,
+        cue: {
+          tastingLineKo: lines.tastingLineKo,
+          reactionLineKo: lines.verdictLineKo,
+          tone,
+        } satisfies JudgingPreviewCue,
+      };
+    },
+    [unlockHiddenRecipeIfMatched],
+  );
+
+  const commitRealtimeVerdict = useCallback(
+    (
+      finishedRoom: BattleRoomData,
+      updatedPlan: BattlePlan,
+      nextVerdict: BattleVerdict,
+    ) => {
+      if (realtimeVerdictDoneRef.current) return;
+      realtimeVerdictDoneRef.current = true;
+      pendingSkipActionRef.current = null;
 
       setBattlePlan(updatedPlan);
       setRealtimeRoom(finishedRoom);
@@ -829,11 +985,15 @@ function GameApp() {
         updatedPlan.fishSpecies,
         0.5,
         updatedPlan.ingredientIds,
-        updatedRival,
+        updatedPlan.rival,
       );
-      worldRef.current?.setBattleOutcome(won ? 'won' : isDraw ? 'draw' : 'lost');
+      worldRef.current?.setBattleOutcome(
+        nextVerdict.won ? 'won' : nextVerdict.isDraw ? 'draw' : 'lost',
+      );
 
-      if (won) {
+      if (nextVerdict.isNewlyUnlockedRecipe) {
+        soundEngine.playRecipeUnlock();
+      } else if (nextVerdict.won) {
         soundEngine.playVictory();
         worldRef.current?.triggerKitchenBurst('judging', 0xfbbf24);
       } else {
@@ -841,21 +1001,54 @@ function GameApp() {
       }
 
       setProfile((prev) => {
-        const nextWins = prev.wins + (won ? 1 : 0);
-        const nextLosses = prev.losses + (won || isDraw ? 0 : 1);
+        const nextWins = prev.wins + (nextVerdict.won ? 1 : 0);
+        const nextLosses = prev.losses + (nextVerdict.won || nextVerdict.isDraw ? 0 : 1);
         const updated: UserProfileData = {
           ...prev,
           wins: nextWins,
           losses: nextLosses,
           totalBattles: nextWins + nextLosses,
-          coins: prev.coins + rewardCoins,
-          bestDishScore: Math.max(prev.bestDishScore, playerTotal),
+          coins: prev.coins + nextVerdict.rewardCoins,
+          bestDishScore: Math.max(prev.bestDishScore, nextVerdict.playerTotal),
         };
         void syncProfileToCloud(updated);
         return updated;
       });
     },
     [syncProfileToCloud],
+  );
+
+  const beginRealtimeJudging = useCallback(
+    (finishedRoom: BattleRoomData, role: 'host' | 'guest', plan: BattlePlan) => {
+      if (realtimeVerdictDoneRef.current) return;
+      if (realtimeJudgingTimerRef.current) {
+        clearTimeout(realtimeJudgingTimerRef.current);
+        realtimeJudgingTimerRef.current = null;
+      }
+
+      const { nextVerdict, updatedPlan, cue } = buildRealtimeVerdictPayload(finishedRoom, role, plan);
+      setJudgingCue(cue);
+      setCookingStage('judging');
+      worldRef.current?.setJudgingTone(cue.tone);
+      worldRef.current?.setCookingStage(
+        'judging',
+        updatedPlan.fishSpecies,
+        0.5,
+        updatedPlan.ingredientIds,
+        updatedPlan.rival,
+      );
+
+      const finishNow = () => {
+        if (realtimeJudgingTimerRef.current) {
+          clearTimeout(realtimeJudgingTimerRef.current);
+          realtimeJudgingTimerRef.current = null;
+        }
+        commitRealtimeVerdict(finishedRoom, updatedPlan, nextVerdict);
+      };
+      pendingSkipActionRef.current = finishNow;
+      realtimeJudgingTimerRef.current = window.setTimeout(finishNow, 2900);
+    },
+    [buildRealtimeVerdictPayload, commitRealtimeVerdict],
   );
 
   // Live Firestore room subscription while an active real-time battle is underway
@@ -878,9 +1071,11 @@ function GameApp() {
           clearTimeout(realtimeJudgingTimerRef.current);
           realtimeJudgingTimerRef.current = null;
         }
+        pendingSkipActionRef.current = null;
         setCookingStage('none');
         setBattlePlan(null);
         setVerdict(null);
+        setJudgingCue(null);
         setRealtimeRoom(null);
         setRealtimeRole(null);
         worldRef.current?.setBattleOutcome('none');
@@ -892,36 +1087,16 @@ function GameApp() {
       if (
         latest.status === 'finished' &&
         !realtimeVerdictDoneRef.current &&
-        (cookingStageRef.current === 'waiting_opponent' ||
-          cookingStageRef.current === 'judging' ||
-          cookingStageRef.current === 'cook')
+        (cookingStageRef.current === 'waiting_opponent' || cookingStageRef.current === 'cook')
       ) {
         const plan = battlePlanRef.current;
         if (!plan) return;
-        const oppSlot = role === 'host' ? latest.guest : latest.host;
-        const oppSynthRival: RivalChef = {
-          ...plan.rival,
-          specialtyFishId: oppSlot.fishSpeciesId || plan.fishSpecies.id,
-          specialtyIngredientIds: oppSlot.ingredientIds,
-        };
-        setCookingStage('judging');
-        worldRef.current?.setCookingStage(
-          'judging',
-          plan.fishSpecies,
-          0.5,
-          plan.ingredientIds,
-          oppSynthRival,
-        );
-        if (realtimeJudgingTimerRef.current) clearTimeout(realtimeJudgingTimerRef.current);
-        realtimeJudgingTimerRef.current = window.setTimeout(() => {
-          realtimeJudgingTimerRef.current = null;
-          finalizeRealtimeVerdict(latest, role, plan);
-        }, 1600);
+        beginRealtimeJudging(latest, role, plan);
       }
     });
 
     return () => unsub();
-  }, [realtimeRoom?.roomId, realtimeRole, isCookingActive, finalizeRealtimeVerdict, showToast]);
+  }, [realtimeRoom?.roomId, realtimeRole, isCookingActive, beginRealtimeJudging, showToast]);
 
   const handleIntroComplete = useCallback(() => {
     if (!battlePlan) return;
@@ -941,54 +1116,19 @@ function GameApp() {
     soundEngine.playClick();
   }, [battlePlan]);
 
-  const finalizeJudging = useCallback(
-    (plan: BattlePlan, finalScores: CookingStageScores) => {
-      const { playerPerfection, playerPalateMatch, playerTotal, dishNameKo } =
-        computePlayerDishMetrics(plan, finalScores);
-
-      const rivalPerfection = Math.min(
-        97,
-        Math.max(45, Math.round(plan.rival.baseSkill + (Math.random() * 12 - 5))),
-      );
-      const rivalPalateMatch = Math.min(
-        96,
-        Math.max(45, Math.round(plan.rival.palateAffinity + (Math.random() * 12 - 5))),
-      );
-      const rivalTotal = rivalPerfection + rivalPalateMatch;
-
-      const won = playerTotal > rivalTotal;
-      const isDraw = playerTotal === rivalTotal;
-      const rewardCoins = won ? 120 + Math.round(playerTotal * 0.4) : isDraw ? 70 : 30;
-
-      let judgeCommentKo = '';
-      if (won) {
-        judgeCommentKo = `정말 훌륭하오! ${plan.fishSpecies.nameKo}의 신선함이 완벽한 손질과 불 조절을 만나 내 입맛에 딱 맞는 최고의 투발루 요리가 완성되었네!`;
-      } else if (isDraw) {
-        judgeCommentKo = `두 셰프 모두 놀라운 실력이로군! 한 끗 차이의 명승부였네. 다음에는 더 귀한 생선과 향신료를 조합해보게나.`;
-      } else {
-        judgeCommentKo = `${plan.rival.nameKo}의 요리가 조금 더 내 입맛과 완성도에 가까웠네. 상점이나 외곽 섬에서 희귀 재료를 모아 다시 도전해보게!`;
-      }
-
-      const nextVerdict: BattleVerdict = {
-        playerPerfection,
-        playerPalateMatch,
-        playerTotal,
-        rivalPerfection,
-        rivalPalateMatch,
-        rivalTotal,
-        won,
-        isDraw,
-        rewardCoins,
-        judgeCommentKo,
-        dishNameKo,
-      };
-
+  const commitAiVerdict = useCallback(
+    (plan: BattlePlan, nextVerdict: BattleVerdict) => {
+      pendingSkipActionRef.current = null;
       setVerdict(nextVerdict);
       setCookingStage('result');
       worldRef.current?.setCookingStage('result', plan.fishSpecies, 0.5, plan.ingredientIds, plan.rival);
-      worldRef.current?.setBattleOutcome(won ? 'won' : isDraw ? 'draw' : 'lost');
+      worldRef.current?.setBattleOutcome(
+        nextVerdict.won ? 'won' : nextVerdict.isDraw ? 'draw' : 'lost',
+      );
 
-      if (won) {
+      if (nextVerdict.isNewlyUnlockedRecipe) {
+        soundEngine.playRecipeUnlock();
+      } else if (nextVerdict.won) {
         soundEngine.playVictory();
         worldRef.current?.triggerKitchenBurst('judging', 0xfbbf24);
       } else {
@@ -996,22 +1136,34 @@ function GameApp() {
       }
 
       setProfile((prev) => {
-        const nextWins = prev.wins + (won ? 1 : 0);
-        const nextLosses = prev.losses + (won || isDraw ? 0 : 1);
+        const nextWins = prev.wins + (nextVerdict.won ? 1 : 0);
+        const nextLosses = prev.losses + (nextVerdict.won || nextVerdict.isDraw ? 0 : 1);
         const updated: UserProfileData = {
           ...prev,
           wins: nextWins,
           losses: nextLosses,
           totalBattles: nextWins + nextLosses,
-          coins: prev.coins + rewardCoins,
-          bestDishScore: Math.max(prev.bestDishScore, playerTotal),
+          coins: prev.coins + nextVerdict.rewardCoins,
+          bestDishScore: Math.max(prev.bestDishScore, nextVerdict.playerTotal),
         };
         void syncProfileToCloud(updated);
         return updated;
       });
     },
-    [computePlayerDishMetrics, syncProfileToCloud],
+    [syncProfileToCloud],
   );
+
+  const handleSkipJudging = useCallback(() => {
+    if (aiJudgingTimerRef.current) {
+      clearTimeout(aiJudgingTimerRef.current);
+      aiJudgingTimerRef.current = null;
+    }
+    if (realtimeJudgingTimerRef.current) {
+      clearTimeout(realtimeJudgingTimerRef.current);
+      realtimeJudgingTimerRef.current = null;
+    }
+    pendingSkipActionRef.current?.();
+  }, []);
 
   const handleStageComplete = useCallback(
     (completed: 'wash' | 'prep' | 'cook', score: number) => {
@@ -1041,15 +1193,22 @@ function GameApp() {
           });
         }
       } else if (completed === 'cook') {
+        const enrichedPlan: BattlePlan = {
+          ...battlePlan,
+          pestSwatted: pestStatsRef.current.swatted,
+          pestMissed: pestStatsRef.current.missed,
+        };
+        setBattlePlan(enrichedPlan);
+
         if (rtRoom && rtRole) {
-          const metrics = computePlayerDishMetrics(battlePlan, updatedScores);
+          const metrics = computePlayerDishMetrics(enrichedPlan, updatedScores);
           setCookingStage('waiting_opponent');
           worldRef.current?.setCookingStage(
             'waiting_opponent',
-            battlePlan.fishSpecies,
+            enrichedPlan.fishSpecies,
             0.5,
-            battlePlan.ingredientIds,
-            battlePlan.rival,
+            enrichedPlan.ingredientIds,
+            enrichedPlan.rival,
           );
           void submitRealtimeBattleFinish(rtRoom.roomId, rtRole, {
             washScore: updatedScores.wash,
@@ -1062,31 +1221,105 @@ function GameApp() {
           }).then((resRoom) => {
             setRealtimeRoom(resRoom);
             if (resRoom.status === 'finished' && !realtimeVerdictDoneRef.current) {
-              setCookingStage('judging');
-              worldRef.current?.setCookingStage(
-                'judging',
-                battlePlan.fishSpecies,
-                0.5,
-                battlePlan.ingredientIds,
-                battlePlan.rival,
-              );
-              if (realtimeJudgingTimerRef.current) clearTimeout(realtimeJudgingTimerRef.current);
-              realtimeJudgingTimerRef.current = window.setTimeout(() => {
-                realtimeJudgingTimerRef.current = null;
-                finalizeRealtimeVerdict(resRoom, rtRole, battlePlan);
-              }, 1600);
+              beginRealtimeJudging(resRoom, rtRole, enrichedPlan);
             }
           });
         } else {
+          const metrics = computePlayerDishMetrics(enrichedPlan, updatedScores);
+          const rivalPerfection = Math.min(
+            97,
+            Math.max(45, Math.round(enrichedPlan.rival.baseSkill + (Math.random() * 12 - 5))),
+          );
+          const rivalPalateMatch = Math.min(
+            96,
+            Math.max(45, Math.round(enrichedPlan.rival.palateAffinity + (Math.random() * 12 - 5))),
+          );
+          const rivalTotal = rivalPerfection + rivalPalateMatch;
+
+          const won = metrics.playerTotal > rivalTotal;
+          const isDraw = metrics.playerTotal === rivalTotal;
+          const rewardCoins = won ? 120 + Math.round(metrics.playerTotal * 0.4) : isDraw ? 70 : 30;
+          const isNewRecipe = metrics.matchedRecipe
+            ? unlockHiddenRecipeIfMatched(metrics.matchedRecipe.id)
+            : false;
+          const scoreMargin = metrics.playerTotal - rivalTotal;
+
+          const lines = pickJudgeEvaluationLines({
+            judgeNameKo: enrichedPlan.judge.nameKo,
+            fishNameKo: enrichedPlan.fishSpecies.nameKo,
+            weatherId: enrichedPlan.weather,
+            weatherMatched: metrics.weatherMatched,
+            freshnessGrade: metrics.freshInfo.grade,
+            hiddenRecipe: metrics.matchedRecipe,
+            isNewRecipe,
+            pestMissed: metrics.pestMissed,
+            won,
+            isDraw,
+            scoreMargin,
+          });
+
+          const tone: JudgingPreviewCue['tone'] =
+            won || isNewRecipe
+              ? 'impressed'
+              : !isDraw && (metrics.freshInfo.grade === 'stale' || metrics.pestMissed > 0 || scoreMargin <= -15)
+                ? 'critical'
+                : 'good';
+
+          const nextVerdict: BattleVerdict = {
+            playerPerfection: metrics.playerPerfection,
+            playerPalateMatch: metrics.playerPalateMatch,
+            playerTotal: metrics.playerTotal,
+            rivalPerfection,
+            rivalPalateMatch,
+            rivalTotal,
+            won,
+            isDraw,
+            rewardCoins,
+            judgeCommentKo: lines.verdictLineKo,
+            judgeTastingLineKo: lines.tastingLineKo,
+            dishNameKo: metrics.dishNameKo,
+            unlockedRecipe: metrics.matchedRecipe,
+            isNewlyUnlockedRecipe: isNewRecipe,
+            freshnessInfo: metrics.freshInfo,
+            weatherId: enrichedPlan.weather,
+          };
+
+          setJudgingCue({
+            tastingLineKo: lines.tastingLineKo,
+            reactionLineKo: lines.verdictLineKo,
+            tone,
+          });
           setCookingStage('judging');
-          worldRef.current?.setCookingStage('judging', battlePlan.fishSpecies, 0.5, battlePlan.ingredientIds, battlePlan.rival);
-          window.setTimeout(() => {
-            finalizeJudging(battlePlan, updatedScores);
-          }, 1800);
+          worldRef.current?.setJudgingTone(tone);
+          worldRef.current?.setCookingStage(
+            'judging',
+            enrichedPlan.fishSpecies,
+            0.5,
+            enrichedPlan.ingredientIds,
+            enrichedPlan.rival,
+          );
+
+          const finishNow = () => {
+            if (aiJudgingTimerRef.current) {
+              clearTimeout(aiJudgingTimerRef.current);
+              aiJudgingTimerRef.current = null;
+            }
+            commitAiVerdict(enrichedPlan, nextVerdict);
+          };
+          pendingSkipActionRef.current = finishNow;
+          if (aiJudgingTimerRef.current) clearTimeout(aiJudgingTimerRef.current);
+          aiJudgingTimerRef.current = window.setTimeout(finishNow, 2900);
         }
       }
     },
-    [battlePlan, stageScores, computePlayerDishMetrics, finalizeJudging, finalizeRealtimeVerdict],
+    [
+      battlePlan,
+      stageScores,
+      computePlayerDishMetrics,
+      unlockHiddenRecipeIfMatched,
+      beginRealtimeJudging,
+      commitAiVerdict,
+    ],
   );
 
   const handleForceTimeoutFinish = useCallback(async () => {
@@ -1096,20 +1329,27 @@ function GameApp() {
     if (!rtRoom || !rtRole || !plan) return;
     try {
       const finished = await finalizeTimedOutRealtimeBattle(rtRoom.roomId, rtRole);
-      finalizeRealtimeVerdict(finished, rtRole, plan);
+      const { nextVerdict, updatedPlan } = buildRealtimeVerdictPayload(finished, rtRole, plan);
+      commitRealtimeVerdict(finished, updatedPlan, nextVerdict);
     } catch {
       showToast('아직 상대방의 대기 시간이 남아 있습니다. 잠시 후 다시 시도해 주세요.');
     }
-  }, [finalizeRealtimeVerdict, showToast]);
+  }, [buildRealtimeVerdictPayload, commitRealtimeVerdict, showToast]);
 
   const handleFinishBattle = useCallback(() => {
+    if (aiJudgingTimerRef.current) {
+      clearTimeout(aiJudgingTimerRef.current);
+      aiJudgingTimerRef.current = null;
+    }
     if (realtimeJudgingTimerRef.current) {
       clearTimeout(realtimeJudgingTimerRef.current);
       realtimeJudgingTimerRef.current = null;
     }
+    pendingSkipActionRef.current = null;
     setCookingStage('none');
     setBattlePlan(null);
     setVerdict(null);
+    setJudgingCue(null);
     setRealtimeRoom(null);
     setRealtimeRole(null);
     realtimeVerdictDoneRef.current = false;
@@ -1282,6 +1522,8 @@ function GameApp() {
 
   const canOpenOverlay = fishingPhase === 'idle' && cookingStage === 'none' && !activeGather;
 
+  const weatherInfo = getCurrentLagoonWeather(nowMs);
+
   const currentZoneLabel =
     zone === 'fishing'
       ? '푸나푸티 낚시터'
@@ -1315,10 +1557,23 @@ function GameApp() {
         <div className="pointer-events-none fixed inset-0 z-20 flex flex-col justify-between p-3 sm:p-4">
           {/* Top Bar */}
           <div className="flex flex-wrap items-start justify-between gap-2 sm:gap-3">
-            {/* Top-Left Compact Status Cluster */}
+            {/* Top-Left Compact Status Cluster + Live Weather Badge */}
             <div className="pointer-events-auto flex flex-wrap items-center gap-1.5 sm:gap-2 rounded-2xl border border-teal-300/30 bg-[#072633]/90 px-3 sm:px-4 py-2 shadow-lg">
               <span className="rounded-lg bg-teal-400/20 px-2 py-0.5 sm:px-2.5 sm:py-1 text-[11px] sm:text-xs font-extrabold text-teal-200">
                 {currentZoneLabel}
+              </span>
+              <span
+                className="flex items-center gap-1 rounded-lg border border-sky-300/30 bg-sky-500/15 px-2 py-0.5 text-[11px] font-extrabold text-sky-100"
+                title={weatherInfo.meta.judgeNeedHintKo}
+              >
+                <span>{weatherInfo.meta.badgeEmoji}</span>
+                <span>{weatherInfo.meta.nameKo}</span>
+                <span className="hidden md:inline text-amber-200">
+                  · {FLAVOR_LABELS[weatherInfo.meta.preferredFlavor].ko}↑
+                </span>
+                <span className="text-[10px] tabular-nums text-sky-300/90">
+                  ({formatClockMmSs(weatherInfo.remainingMs)})
+                </span>
               </span>
               <span className="tabular-nums text-xs sm:text-sm font-black text-amber-300">
                 {profile.coins} T$
@@ -1338,7 +1593,11 @@ function GameApp() {
               <button
                 type="button"
                 disabled={!canOpenOverlay}
-                onClick={() => canOpenOverlay && setActiveModal('dex')}
+                onClick={() => {
+                  if (!canOpenOverlay) return;
+                  setDexInitialTab('fish');
+                  setActiveModal('dex');
+                }}
                 className={`flex min-h-[40px] items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-extrabold transition-colors ${
                   canOpenOverlay
                     ? 'border-cyan-300/40 bg-[#072633]/90 text-cyan-100 hover:bg-[#0c3a4c] cursor-pointer'
@@ -1347,6 +1606,24 @@ function GameApp() {
               >
                 <BookOpen className="h-4 w-4 text-cyan-300" />
                 <span>물고기 도감 ({caughtSpeciesIds.length}/{FISH_CATALOG.length})</span>
+              </button>
+
+              <button
+                type="button"
+                disabled={!canOpenOverlay}
+                onClick={() => {
+                  if (!canOpenOverlay) return;
+                  setDexInitialTab('recipes');
+                  setActiveModal('dex');
+                }}
+                className={`flex min-h-[40px] items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-extrabold transition-colors ${
+                  canOpenOverlay
+                    ? 'border-purple-300/40 bg-[#072633]/90 text-purple-200 hover:bg-[#0c3a4c] cursor-pointer'
+                    : 'border-white/10 bg-[#072633]/50 text-slate-400 cursor-not-allowed'
+                }`}
+              >
+                <Sparkles className="h-4 w-4 text-purple-300" />
+                <span>비밀 레시피 ({discoveredRecipeIds.length}/{HIDDEN_RECIPES.length})</span>
               </button>
 
               <button
@@ -1666,6 +1943,9 @@ function GameApp() {
           onPotDrop={(col, kind) => worldRef.current?.triggerPotDrop(col, kind)}
           onFanStroke={() => worldRef.current?.triggerFanStroke()}
           onHeatChange={(h) => worldRef.current?.setHeatLevel(h)}
+          onPestReport={(swatted, missed) => {
+            pestStatsRef.current = { swatted, missed };
+          }}
           onStageComplete={handleStageComplete}
         />
       ) : null}
@@ -1679,6 +1959,7 @@ function GameApp() {
           phase={cookingStage}
           plan={battlePlan}
           verdict={verdict}
+          judgingCue={judgingCue}
           realtimePlayers={
             realtimeRoom && realtimeRole
               ? {
@@ -1691,6 +1972,7 @@ function GameApp() {
           isSignedIn={Boolean(authUser)}
           rankPublished={rankPublishedThisBattle}
           publishingRank={publishingRank}
+          onSkipJudging={handleSkipJudging}
           onForceTimeoutFinish={() => void handleForceTimeoutFinish()}
           onPublishRank={() => void handlePublishRank()}
           onSignInAndPublish={() => void handleSignInAndPublish()}
@@ -1698,11 +1980,13 @@ function GameApp() {
         />
       ) : null}
 
-      {/* Dedicated Fish Encyclopedia Modal */}
+      {/* Dedicated Fish & Hidden Recipe Encyclopedia Modal */}
       {activeModal === 'dex' ? (
         <FishDexModal
           caughtSpeciesIds={caughtSpeciesIds}
           dexRecords={fishDexRecords}
+          discoveredRecipeIds={discoveredRecipeIds}
+          initialTab={dexInitialTab}
           onClose={() => setActiveModal('none')}
         />
       ) : null}
@@ -1734,6 +2018,9 @@ function GameApp() {
           profile={profile}
           fishInventory={fishInventory}
           pantry={pantry}
+          weather={weatherInfo.weather}
+          nowMs={nowMs}
+          discoveredRecipeIds={discoveredRecipeIds}
           initialRoom={realtimeRoom}
           initialRole={realtimeRole}
           onSignIn={async () => {
@@ -1764,6 +2051,9 @@ function GameApp() {
           pantry={pantry}
           judge={TUVALU_JUDGES[judgeIdx]}
           rival={RIVAL_CHEFS[rivalIdx]}
+          weather={weatherInfo.weather}
+          nowMs={nowMs}
+          discoveredRecipeIds={discoveredRecipeIds}
           onStartBattle={(plan) => {
             setRealtimeRoom(null);
             setRealtimeRole(null);
@@ -1825,9 +2115,9 @@ function GameApp() {
 
             <div className="mt-4 rounded-2xl bg-[#0c3747] p-4 text-xs leading-relaxed text-slate-200 space-y-1">
               <div>• <strong>자유 이동 &amp; 점프</strong>: WASD/방향키 또는 조이스틱으로 섬을 자유롭게 탐험하고 <strong>Space(스페이스)</strong>로 점프하세요.</div>
-              <div>• <strong>외부 낚시터</strong>: 부두 끝에서 <strong>E 키</strong> 또는 버튼으로 낚시를 해 물고기와 돈을 얻습니다.</div>
+              <div>• <strong>날씨 &amp; 생선 신선도</strong>: 라군 날씨에 따라 심사위원 입맛이 변하며, 낚은 물고기는 시간이 지날수록 신선도가 하락합니다!</div>
               <div>• <strong>선착장 &amp; 배 항해</strong>: 동쪽 선착장에서 배를 띄워 약 30초 거리의 3개 외곽 섬에서 희귀 재료를 채집하세요!</div>
-              <div>• <strong>내부 조리실 &amp; 요리 대결</strong>: 3단계 요리 후 완성된 요리와 라이벌 요리를 투발루 현지인이 심사합니다.</div>
+              <div>• <strong>요리 대결 &amp; 비밀 레시피</strong>: 요리 중 날아드는 날파리를 터치해 막아내고, 등급+카테고리 힌트로 숨겨진 비법 요리를 해금해보세요.</div>
             </div>
 
             <div className="mt-5 flex justify-end">

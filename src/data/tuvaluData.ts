@@ -1,14 +1,18 @@
 import {
+  FishFreshnessInfo,
   FishSpecies,
   FishTier,
   FishingDifficultySpec,
   FlavorTag,
+  HiddenRecipe,
   IngredientCategory,
   IngredientItem,
   OuterIslandMeta,
   RivalChef,
   TierMeta,
   TuvaluJudge,
+  WeatherId,
+  WeatherMeta,
 } from '../types/game';
 
 export const TIER_ORDER: Record<FishTier | 'none', number> = {
@@ -803,3 +807,418 @@ export function getChefTitleForWins(wins: number): string {
   if (wins >= 1) return '라군 첫 승리 어부셰프';
   return '푸나푸티 견습 낚시셰프';
 }
+
+// ============================================================
+// 1. WEATHER SYSTEM & DYNAMIC JUDGE NEEDS
+// ============================================================
+export const WEATHER_CYCLE_MS = 180_000; // 3 minutes per synced Tuvalu weather cycle
+
+export const WEATHER_ORDER: WeatherId[] = [
+  'sunny',
+  'squall',
+  'gale',
+  'heatwave',
+  'starlit',
+];
+
+export const WEATHER_CATALOG: Record<WeatherId, WeatherMeta> = {
+  sunny: {
+    id: 'sunny',
+    nameKo: '쾌청한 무역풍',
+    subtitleKo: '맑고 청량한 푸나푸티 하늘',
+    badgeEmoji: '☀️',
+    preferredFlavor: 'fresh',
+    secondaryFlavor: 'savory',
+    judgeNeedHintKo: '맑은 날씨 덕분에 산뜻한 바다향과 깔끔한 담백함이 돋보이는 요리를 선호합니다.',
+    skyHex: 0x7be0ef,
+    fogHex: 0x7be0ef,
+    fogDensity: 0.003,
+    sunHex: 0xfff1d6,
+    sunIntensity: 2.0,
+    hemiSkyHex: 0xa5f3fc,
+    hemiIntensity: 0.9,
+    windStrength: 1.0,
+    hasRain: false,
+  },
+  squall: {
+    id: 'squall',
+    nameKo: '열대 스콜 폭우',
+    subtitleKo: '세찬 빗줄기가 쏟아지는 라군',
+    badgeEmoji: '🌧️',
+    preferredFlavor: 'spicy',
+    secondaryFlavor: 'rich',
+    judgeNeedHintKo: '빗소리가 차가워지면서 몸을 녹이는 화끈한 풍미와 진한 고소함을 강하게 찾습니다!',
+    skyHex: 0x475e73,
+    fogHex: 0x4b6277,
+    fogDensity: 0.0052,
+    sunHex: 0xcbd5e1,
+    sunIntensity: 1.05,
+    hemiSkyHex: 0x94a3b8,
+    hemiIntensity: 0.72,
+    windStrength: 1.9,
+    hasRain: true,
+  },
+  gale: {
+    id: 'gale',
+    nameKo: '남태평양 강풍',
+    subtitleKo: '야자수가 거세게 흔들리는 바닷바람',
+    badgeEmoji: '💨',
+    preferredFlavor: 'umami',
+    secondaryFlavor: 'rich',
+    judgeNeedHintKo: '거친 바람을 이겨낼 묵직하고 깊은 감칠맛과 든든한 고소함이 오늘의 핵심입니다.',
+    skyHex: 0x60a5c8,
+    fogHex: 0x67abc9,
+    fogDensity: 0.0038,
+    sunHex: 0xfde68a,
+    sunIntensity: 1.55,
+    hemiSkyHex: 0xbae6fd,
+    hemiIntensity: 0.85,
+    windStrength: 2.6,
+    hasRain: false,
+  },
+  heatwave: {
+    id: 'heatwave',
+    nameKo: '작열하는 열대 폭염',
+    subtitleKo: '햇살이 뜨겁게 내리쬐는 한낮',
+    badgeEmoji: '🔥',
+    preferredFlavor: 'fresh',
+    secondaryFlavor: 'spicy',
+    judgeNeedHintKo: '무더위 속 입맛을 확 깨워줄 상큼한 바다향과 알싸한 매운맛 조합이 인기입니다!',
+    skyHex: 0x99f6e4,
+    fogHex: 0xbae6fd,
+    fogDensity: 0.0026,
+    sunHex: 0xffedd5,
+    sunIntensity: 2.45,
+    hemiSkyHex: 0xfef3c7,
+    hemiIntensity: 1.05,
+    windStrength: 0.65,
+    hasRain: false,
+  },
+  starlit: {
+    id: 'starlit',
+    nameKo: '은빛 별빛 황혼',
+    subtitleKo: '잔잔한 저녁 노을과 산호초의 밤',
+    badgeEmoji: '🌙',
+    preferredFlavor: 'umami',
+    secondaryFlavor: 'savory',
+    judgeNeedHintKo: '고즈넉한 밤바다 분위기 속에서 깊은 감칠맛과 정갈하고 담백한 맛을 높이 평가합니다.',
+    skyHex: 0x1e3a5f,
+    fogHex: 0x1e3a5f,
+    fogDensity: 0.0042,
+    sunHex: 0xfdba74,
+    sunIntensity: 1.25,
+    hemiSkyHex: 0x64748b,
+    hemiIntensity: 0.78,
+    windStrength: 0.85,
+    hasRain: false,
+  },
+};
+
+export function getCurrentLagoonWeather(nowMs = Date.now()): {
+  weather: WeatherId;
+  meta: WeatherMeta;
+  remainingMs: number;
+  nextWeather: WeatherMeta;
+} {
+  const slot = Math.floor(nowMs / WEATHER_CYCLE_MS);
+  const idx = ((slot % WEATHER_ORDER.length) + WEATHER_ORDER.length) % WEATHER_ORDER.length;
+  const nextIdx = (idx + 1) % WEATHER_ORDER.length;
+  const weather = WEATHER_ORDER[idx];
+  const remainingMs = WEATHER_CYCLE_MS - (nowMs % WEATHER_CYCLE_MS);
+  return {
+    weather,
+    meta: WEATHER_CATALOG[weather],
+    remainingMs,
+    nextWeather: WEATHER_CATALOG[WEATHER_ORDER[nextIdx]],
+  };
+}
+
+export function getJudgeNeedsForWeather(
+  judge: TuvaluJudge,
+  weather: WeatherId,
+): {
+  effectiveFlavors: FlavorTag[];
+  weatherBoostFlavor: FlavorTag;
+  weatherNoteKo: string;
+} {
+  const wMeta = WEATHER_CATALOG[weather];
+  // Combine 1st core preference of judge with the active weather's preferred flavor
+  const combined: FlavorTag[] = [judge.preferredFlavors[0], wMeta.preferredFlavor];
+  if (!combined.includes(wMeta.secondaryFlavor)) {
+    // Keep 2-3 clear tags so judge personality + weather shift are both felt
+    if (!combined.includes(judge.preferredFlavors[1])) {
+      combined.push(judge.preferredFlavors[1]);
+    }
+  }
+  const uniqueFlavors = Array.from(new Set(combined));
+  return {
+    effectiveFlavors: uniqueFlavors,
+    weatherBoostFlavor: wMeta.preferredFlavor,
+    weatherNoteKo: `${wMeta.badgeEmoji} ${wMeta.nameKo} 영향 · ${FLAVOR_LABELS[wMeta.preferredFlavor].ko} 선호 급상승!`,
+  };
+}
+
+// ============================================================
+// 2. FISH FRESHNESS DECAY OVER TIME
+// ============================================================
+export function getFreshnessFromPercent(percent: number, ageMinutes = 0): FishFreshnessInfo {
+  const clamped = Math.max(15, Math.min(100, Math.round(percent)));
+  if (clamped >= 85) {
+    return {
+      percent: clamped,
+      grade: 'fresh',
+      labelKo: '최상급 신선',
+      ageMinutes,
+      perfectionDelta: 8,
+      palateDelta: 6,
+      colorClass: 'text-emerald-300',
+      barColorHex: '#34d399',
+    };
+  }
+  if (clamped >= 55) {
+    return {
+      percent: clamped,
+      grade: 'good',
+      labelKo: '신선 양호',
+      ageMinutes,
+      perfectionDelta: 3,
+      palateDelta: 2,
+      colorClass: 'text-cyan-300',
+      barColorHex: '#22d3ee',
+    };
+  }
+  if (clamped >= 30) {
+    return {
+      percent: clamped,
+      grade: 'aging',
+      labelKo: '숙성 진행',
+      ageMinutes,
+      perfectionDelta: 0,
+      palateDelta: -2,
+      colorClass: 'text-amber-300',
+      barColorHex: '#fbbf24',
+    };
+  }
+  return {
+    percent: clamped,
+    grade: 'stale',
+    labelKo: '신선도 저하',
+    ageMinutes,
+    perfectionDelta: -8,
+    palateDelta: -8,
+    colorClass: 'text-rose-300',
+    barColorHex: '#fb7185',
+  };
+}
+
+export function computeFishFreshness(caughtAt: number, nowMs = Date.now()): FishFreshnessInfo {
+  const safeCaughtAt = Number.isFinite(caughtAt) && caughtAt > 0 ? caughtAt : nowMs;
+  const ageMinutes = Math.max(0, (nowMs - safeCaughtAt) / 60000);
+  // 100% right when caught, drops ~5.5% per minute down to a 15% floor (~15.5 mins)
+  const pct = Math.max(15, Math.min(100, Math.round(100 - ageMinutes * 5.5)));
+  return getFreshnessFromPercent(pct, ageMinutes);
+}
+
+// ============================================================
+// 3. HIDDEN RECIPES (Only Fish Tier + Ingredient Categories Hinted!)
+// ============================================================
+export const HIDDEN_RECIPES: HiddenRecipe[] = [
+  {
+    id: 'secret_lagoon_breeze',
+    requiredFishTier: 'uncommon',
+    requiredCategories: ['vegetable', 'salt'],
+    nameKo: '푸나푸티 해풍 파피오 찜',
+    dishTitleKo: '비법: 푸나푸티 해풍 파피오 찜',
+    bonusPerfection: 12,
+    bonusPalate: 10,
+    loreKo: '담백한 드문 등급 생선에 섬 채소와 소금을 곁들여 바닷바람처럼 산뜻하게 쪄낸 투발루 어부의 비밀 레시피입니다.',
+  },
+  {
+    id: 'secret_coral_smoke',
+    requiredFishTier: 'epic',
+    requiredCategories: ['meat', 'spice'],
+    nameKo: '산호초 훈연 로로 스테이크',
+    dishTitleKo: '비법: 산호초 훈연 로로 스테이크',
+    bonusPerfection: 15,
+    bonusPalate: 14,
+    loreKo: '에픽 생선의 진한 육즙에 육류와 열대 향신료를 함께 훈연해 폭발적인 풍미를 끌어올린 야성적인 비법 요리입니다.',
+  },
+  {
+    id: 'secret_fatele_stew',
+    requiredFishTier: 'epic',
+    requiredCategories: ['meat', 'vegetable', 'salt'],
+    nameKo: '파텔레 축제 3색 라군 스튜',
+    dishTitleKo: '비법: 파텔레 축제 3색 라군 스튜',
+    bonusPerfection: 18,
+    bonusPalate: 15,
+    loreKo: '에픽 생선과 고기, 채소, 천연 소금이 황금 비율로 어우러져 투발루 전통 축제에서 대대로 전해 내려온 비법 스튜입니다.',
+  },
+  {
+    id: 'secret_ocean_poache',
+    requiredFishTier: 'legendary',
+    requiredCategories: ['vegetable', 'spice'],
+    nameKo: '대양의 숨결 산호 허브 포셰',
+    dishTitleKo: '비법: 대양의 숨결 산호 허브 포셰',
+    bonusPerfection: 17,
+    bonusPalate: 16,
+    loreKo: '전설 어종의 부드러운 살결을 채소와 향신료 육수에 천천히 익혀 바다의 정수를 담아낸 궁극의 비법입니다.',
+  },
+  {
+    id: 'secret_royal_legend',
+    requiredFishTier: 'legendary',
+    requiredCategories: ['meat', 'salt', 'spice'],
+    nameKo: '전설의 대어 황금 코코넛 만찬',
+    dishTitleKo: '비법: 전설의 대어 황금 코코넛 만찬',
+    bonusPerfection: 20,
+    bonusPalate: 18,
+    loreKo: '전설 생선에 훈연 고기와 소금, 향신료까지 더해 장로들만이 맛보던 최고급 왕실 만찬을 재현했습니다.',
+  },
+  {
+    id: 'secret_mythic_palace',
+    requiredFishTier: 'mythic',
+    requiredCategories: ['meat', 'vegetable', 'spice'],
+    nameKo: '용왕의 신화 라군 궁정 요리',
+    dishTitleKo: '비법: 용왕의 신화 라군 궁정 요리',
+    bonusPerfection: 24,
+    bonusPalate: 22,
+    loreKo: '신화 등급의 영물 어종에 육·해·공 최고의 부재료를 결합해 투발루 전설 속 천상의 맛을 깨운 궁극의 레시피입니다.',
+  },
+];
+
+export function findMatchingHiddenRecipe(
+  fishTier: FishTier,
+  ingredientIds: string[],
+): HiddenRecipe | undefined {
+  const selectedCats = new Set<IngredientCategory>();
+  ingredientIds.forEach((id) => {
+    const ing = INGREDIENT_CATALOG.find((i) => i.id === id);
+    if (ing) selectedCats.add(ing.category);
+  });
+
+  // Check exact-count matches first (more specific 3-category recipes take priority over 2-category)
+  const candidates = HIDDEN_RECIPES.filter(
+    (r) =>
+      r.requiredFishTier === fishTier &&
+      r.requiredCategories.length === selectedCats.size &&
+      r.requiredCategories.every((cat) => selectedCats.has(cat)),
+  );
+  if (candidates.length > 0) return candidates[0];
+
+  // Fallback if player brought 3 ingredients of 2 categories (e.g. two spices + one meat)
+  return HIDDEN_RECIPES.slice()
+    .sort((a, b) => b.requiredCategories.length - a.requiredCategories.length)
+    .find(
+      (r) =>
+        r.requiredFishTier === fishTier &&
+        r.requiredCategories.every((cat) => selectedCats.has(cat)),
+    );
+}
+
+// ============================================================
+// 4. SITUATIONAL RANDOM JUDGE DIALOGUE POOLS
+// ============================================================
+export interface JudgeEvalDialogueInput {
+  judgeNameKo: string;
+  fishNameKo: string;
+  weatherId: WeatherId;
+  weatherMatched: boolean;
+  freshnessGrade: FishFreshnessInfo['grade'];
+  hiddenRecipe?: HiddenRecipe;
+  isNewRecipe?: boolean;
+  pestMissed: number;
+  won: boolean;
+  isDraw: boolean;
+  scoreMargin: number;
+}
+
+function pickRandom<T>(arr: T[]): T {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+export function pickJudgeEvaluationLines(input: JudgeEvalDialogueInput): {
+  tastingLineKo: string;
+  verdictLineKo: string;
+} {
+  const wMeta = WEATHER_CATALOG[input.weatherId];
+
+  const tastingPool: string[] = [];
+  if (input.hiddenRecipe) {
+    tastingPool.push(
+      `허어...! 이 오묘한 향기는 잊혀진 투발루 비법 「${input.hiddenRecipe.nameKo}」 아닌가?!`,
+      `첫 술을 뜨자마자 라군의 전설이 떠오르는 깊은 풍미로구나!`,
+    );
+  }
+  if (input.freshnessGrade === 'fresh') {
+    tastingPool.push(
+      `방금 갓 건져 올린 듯 ${input.fishNameKo}의 살결이 탱글탱글 살아있구려!`,
+      `입안에 넣자마자 맑은 라군의 신선함이 그대로 퍼지는군!`,
+    );
+  } else if (input.freshnessGrade === 'stale') {
+    tastingPool.push(
+      `음... ${input.fishNameKo}를 잡은 지 시간이 제법 지난 모양이군. 향이 조금 무뎌졌어.`,
+      `조리 솜씨는 좋으나 생선의 신선도가 떨어져 본연의 탄력이 아쉽구려.`,
+    );
+  }
+  if (input.weatherMatched) {
+    tastingPool.push(
+      `오늘처럼 ${wMeta.nameKo} 날씨에 딱 어울리는 기막힌 한 접시로다!`,
+      `${wMeta.badgeEmoji} ${wMeta.nameKo} 속에서 이 맛을 보니 속까지 확 풀리는구만!`,
+    );
+  } else {
+    tastingPool.push(
+      `음~ 정성은 느껴지지만 오늘 ${wMeta.nameKo} 날씨에 기대했던 풍미와는 살짝 결이 다르군.`,
+    );
+  }
+  if (tastingPool.length === 0) {
+    tastingPool.push(
+      `흠... ${input.fishNameKo}의 익힘 정도와 양념의 균형을 천천히 음미해 보겠네.`,
+      `과연 투발루의 정통 불맛이 얼마나 스며들었을지 한 점 맛보겠소!`,
+    );
+  }
+
+  const verdictPool: string[] = [];
+  if (input.isNewRecipe && input.hiddenRecipe) {
+    verdictPool.push(
+      `믿을 수 없소! 숨겨진 비법 「${input.hiddenRecipe.nameKo}」을(를) 완벽히 재현해내며 오늘의 승리를 거머쥐었네!`,
+      `전설 속 「${input.hiddenRecipe.nameKo}」이(가) 눈앞에서 완성되다니! 투발루 미식사에 남을 명요리일세!`,
+    );
+  } else if (input.won) {
+    if (input.scoreMargin >= 22) {
+      verdictPool.push(
+        `압도적인 완승이로군! ${wMeta.nameKo} 날씨와 완벽히 어우러진 ${input.fishNameKo} 요리에 두 손 두 발 다 들었네!`,
+        `입맛 궁합부터 화덕 불 조절까지 흠잡을 데가 없소! 진정한 라군의 명장다운 솜씨야!`,
+      );
+    } else {
+      verdictPool.push(
+        `손에 땀을 쥐는 접전 끝의 승리네! 마지막 정성이 심사위원의 마음을 움직였소.`,
+        `아슬아슬했지만 한 끗 더 섬세한 풍미 균형으로 오늘의 주인공이 되었구려!`,
+      );
+    }
+  } else if (input.isDraw) {
+    verdictPool.push(
+      `이럴 수가, 우열을 가릴 수 없는 완벽한 동점이네! 두 셰프의 열정에 박수를 보내오.`,
+      `모래사장과 파도처럼 절묘한 무승부구려! 다음 승부에서는 신선도와 숨겨진 비법으로 갈려보세.`,
+    );
+  } else {
+    if (input.pestMissed > 0) {
+      verdictPool.push(
+        `요리 도중 날파리 방해를 허용한 것이 뼈아팠네. 위생과 집중력을 지키면 충분히 이길 수 있소!`,
+      );
+    }
+    if (input.freshnessGrade === 'stale') {
+      verdictPool.push(
+        `생선 신선도가 떨어져 제 실력이 다 나오지 못했구려. 갓 낚은 생선으로 다시 승부해 보게나!`,
+      );
+    }
+    verdictPool.push(
+      `아쉽게 패배했지만 기본기는 탄탄하네! 오늘 날씨(${wMeta.nameKo})에 맞는 향신료를 더 챙겨보게.`,
+      `상대의 한 방이 조금 더 날카로웠소. 외곽 섬 희귀 재료나 숨겨진 레시피 조합을 노려보게나!`,
+    );
+  }
+
+  return {
+    tastingLineKo: pickRandom(tastingPool),
+    verdictLineKo: pickRandom(verdictPool),
+  };
+}
+

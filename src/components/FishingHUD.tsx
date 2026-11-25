@@ -349,6 +349,11 @@ export const FishingHUD: React.FC<FishingHUDProps> = ({
             {lastCaught.species.tuvaluFact}
           </p>
 
+          <div className="mt-2.5 flex items-center justify-between rounded-xl border border-emerald-400/35 bg-emerald-500/10 px-3 py-2 text-[11px] font-bold text-emerald-200">
+            <span>신선도 100% (최상급)</span>
+            <span className="text-emerald-300/80">시간이 지나면 신선도가 하락하니 빨리 요리하세요!</span>
+          </div>
+
           {!catchUnlocked ? (
             <div className="mt-3">
               <div className="flex justify-between text-[11px] font-bold text-amber-200">

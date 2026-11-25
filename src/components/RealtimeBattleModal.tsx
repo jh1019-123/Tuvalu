@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  BookOpen,
   Check,
   CheckCircle2,
   Copy,
@@ -7,11 +8,13 @@ import {
   Flame,
   KeyRound,
   Loader2,
+  Lock,
   LogIn,
   PlusCircle,
   Radio,
   ShoppingBag,
   Shuffle,
+  Sparkles,
   Swords,
   Trophy,
   UserCheck,
@@ -22,9 +25,14 @@ import {
   FISH_CATALOG,
   FISH_TIERS,
   FLAVOR_LABELS,
+  HIDDEN_RECIPES,
   INGREDIENT_CATALOG,
   TUVALU_JUDGES,
+  WEATHER_CATALOG,
+  computeFishFreshness,
+  findMatchingHiddenRecipe,
   getChefTitleForWins,
+  getJudgeNeedsForWeather,
 } from '../data/tuvaluData';
 import {
   BattleRoomError,
@@ -41,6 +49,7 @@ import {
   BattleRoomData,
   CaughtFish,
   UserProfileData,
+  WeatherId,
 } from '../types/game';
 
 interface RealtimeBattleModalProps {
@@ -48,6 +57,9 @@ interface RealtimeBattleModalProps {
   profile: UserProfileData;
   fishInventory: CaughtFish[];
   pantry: Record<string, number>;
+  weather: WeatherId;
+  nowMs: number;
+  discoveredRecipeIds: string[];
   initialRoom: BattleRoomData | null;
   initialRole: 'host' | 'guest' | null;
   onSignIn: () => Promise<void>;
@@ -68,6 +80,9 @@ export const RealtimeBattleModal: React.FC<RealtimeBattleModalProps> = ({
   profile,
   fishInventory,
   pantry,
+  weather,
+  nowMs,
+  discoveredRecipeIds,
   initialRoom,
   initialRole,
   onSignIn,
@@ -87,6 +102,7 @@ export const RealtimeBattleModal: React.FC<RealtimeBattleModalProps> = ({
   const [signingIn, setSigningIn] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [showRecipeHints, setShowRecipeHints] = useState(false);
 
   // Dish Selection State inside Waiting / Prep Room
   const [selectedFishUid, setSelectedFishUid] = useState<string>(fishInventory[0]?.uid ?? '');
@@ -99,6 +115,10 @@ export const RealtimeBattleModal: React.FC<RealtimeBattleModalProps> = ({
   const selectedSpecies = selectedFish
     ? FISH_CATALOG.find((s) => s.id === selectedFish.speciesId)
     : undefined;
+  const selectedFreshness = selectedFish
+    ? computeFishFreshness(selectedFish.caughtAt, nowMs)
+    : null;
+  const weatherMeta = WEATHER_CATALOG[weather];
 
   const ownedIngredients = useMemo(
     () => INGREDIENT_CATALOG.filter((item) => (pantry[item.id] ?? 0) > 0),
@@ -164,22 +184,39 @@ export const RealtimeBattleModal: React.FC<RealtimeBattleModalProps> = ({
     return found ?? TUVALU_JUDGES[0];
   }, [room]);
 
+  const judgeWeatherNeeds = useMemo(
+    () => getJudgeNeedsForWeather(activeJudge, weather),
+    [activeJudge, weather],
+  );
+
+  const matchedHidden = useMemo(() => {
+    if (!selectedSpecies) return undefined;
+    return findMatchingHiddenRecipe(selectedSpecies.tier, selectedIngIds);
+  }, [selectedSpecies, selectedIngIds]);
+
+  const isMatchedKnown = Boolean(matchedHidden && discoveredRecipeIds.includes(matchedHidden.id));
+
   const palatePreviewScore = useMemo(() => {
     if (!selectedSpecies) return 0;
     let score = 35;
     selectedSpecies.flavorTags.forEach((tag) => {
-      if (activeJudge.preferredFlavors.includes(tag)) score += 12;
+      if (judgeWeatherNeeds.effectiveFlavors.includes(tag)) score += 12;
+      if (tag === judgeWeatherNeeds.weatherBoostFlavor) score += 4;
     });
     selectedIngIds.forEach((id) => {
       const ing = INGREDIENT_CATALOG.find((i) => i.id === id);
       if (!ing) return;
       score += Math.round(ing.palateBonus * 0.65);
       ing.flavorTags.forEach((t) => {
-        if (activeJudge.preferredFlavors.includes(t)) score += 9;
+        if (judgeWeatherNeeds.effectiveFlavors.includes(t)) score += 9;
+        if (t === judgeWeatherNeeds.weatherBoostFlavor) score += 3;
       });
     });
-    return Math.min(100, score);
-  }, [selectedSpecies, selectedIngIds, activeJudge]);
+    if (selectedFreshness) {
+      score += selectedFreshness.palateDelta;
+    }
+    return Math.max(10, Math.min(100, score));
+  }, [selectedSpecies, selectedIngIds, judgeWeatherNeeds, selectedFreshness]);
 
   const toggleIngredient = (id: string) => {
     const mySlot = room && role ? (role === 'host' ? room.host : room.guest) : null;
@@ -635,11 +672,25 @@ export const RealtimeBattleModal: React.FC<RealtimeBattleModalProps> = ({
 
                 <div className="flex items-center gap-2">
                   <div className="rounded-xl bg-slate-900/70 px-3 py-2 text-right text-xs">
-                    <div className="font-bold text-teal-300">심사위원: {activeJudge.nameKo}</div>
+                    <div className="font-bold text-teal-300">
+                      심사위원: {activeJudge.nameKo} ({weatherMeta.badgeEmoji} {weatherMeta.nameKo})
+                    </div>
                     <div className="text-[11px] text-slate-300">
-                      선호: {activeJudge.preferredFlavors.map((t) => FLAVOR_LABELS[t].ko).join(' · ')}
+                      선호: {judgeWeatherNeeds.effectiveFlavors.map((t) => FLAVOR_LABELS[t].ko).join(' · ')}
                     </div>
                   </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowRecipeHints((v) => !v)}
+                    className={`flex items-center gap-1 rounded-xl border px-3 py-2.5 text-xs font-extrabold cursor-pointer ${
+                      showRecipeHints
+                        ? 'border-amber-300 bg-amber-400 text-slate-950'
+                        : 'border-amber-300/40 bg-amber-400/15 text-amber-200 hover:bg-amber-400/25'
+                    }`}
+                  >
+                    <BookOpen className="h-3.5 w-3.5" />
+                    {showRecipeHints ? '선택 화면' : '비밀 레시피'}
+                  </button>
                   <button
                     type="button"
                     onClick={() => void handleLeaveRoom()}
@@ -667,111 +718,194 @@ export const RealtimeBattleModal: React.FC<RealtimeBattleModalProps> = ({
                     )}
               </div>
 
-              {/* Fish & Ingredients Selection (available while waiting or in prep) */}
-              <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
-                <div className="space-y-3 lg:col-span-6">
-                  <h3 className="text-sm font-extrabold text-white">
-                    1. 주재료 물고기 선택 ({fishInventory.length}마리 보유)
-                  </h3>
-                  <div className="tuvalu-scroll grid max-h-40 grid-cols-1 gap-2 overflow-y-auto pr-1 sm:grid-cols-2">
-                    {fishInventory.map((f) => {
-                      const sp = FISH_CATALOG.find((c) => c.id === f.speciesId);
-                      if (!sp) return null;
-                      const tier = FISH_TIERS[sp.tier];
-                      const active = selectedFish?.uid === f.uid;
+              {showRecipeHints ? (
+                <div className="rounded-2xl border border-amber-300/35 bg-[#0c3747] p-4">
+                  <div className="mb-2.5 text-xs text-amber-100">
+                    비밀 레시피는 <strong>물고기 등급</strong>과 <strong>식재료 카테고리</strong>만 공개됩니다!
+                  </div>
+                  <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+                    {HIDDEN_RECIPES.map((r) => {
+                      const tier = FISH_TIERS[r.requiredFishTier];
+                      const unlocked = discoveredRecipeIds.includes(r.id);
                       return (
-                        <button
-                          key={f.uid}
-                          type="button"
-                          disabled={Boolean(mySlot?.ready)}
-                          onClick={() => setSelectedFishUid(f.uid)}
-                          className={`rounded-xl border p-2.5 text-left transition-colors ${
-                            mySlot?.ready ? 'opacity-65 cursor-not-allowed' : 'cursor-pointer'
-                          } ${
-                            active
-                              ? 'border-amber-300 bg-amber-400/15'
-                              : 'border-white/10 bg-[#0c3747] hover:border-teal-300/40'
+                        <div
+                          key={r.id}
+                          className={`rounded-xl border p-3 ${
+                            unlocked
+                              ? 'border-amber-300/50 bg-[#103d4d]'
+                              : 'border-white/10 bg-slate-900/70'
                           }`}
                         >
-                          <span
-                            className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-extrabold ${tier.bgClass} ${tier.textClass}`}
-                          >
-                            {tier.labelKo}
-                          </span>
-                          <div className="mt-0.5 text-xs font-bold text-white">{sp.nameKo}</div>
-                          <div className="text-[10px] text-slate-300">
-                            {f.weightKg.toFixed(1)}kg · +{tier.dishQualityBonus}
+                          <div className="flex items-center justify-between gap-2 text-xs font-extrabold">
+                            <span className="flex items-center gap-1.5 text-white">
+                              {unlocked ? (
+                                <Sparkles className="h-3.5 w-3.5 text-amber-300" />
+                              ) : (
+                                <Lock className="h-3.5 w-3.5 text-slate-400" />
+                              )}
+                              {unlocked ? r.nameKo : '??? (미발견)'}
+                            </span>
+                            <span className="text-[10px] text-slate-300">
+                              {unlocked ? `완성+${r.bonusPerfection} · 입맛+${r.bonusPalate}` : '효과 비공개 ???'}
+                            </span>
                           </div>
-                        </button>
+                          <div className="mt-2 flex flex-wrap items-center gap-1">
+                            <span
+                              className={`rounded border px-1.5 py-0.5 text-[10px] font-extrabold ${tier.bgClass} ${tier.borderClass} ${tier.textClass}`}
+                            >
+                              {tier.labelKo}
+                            </span>
+                            <span className="text-[10px] text-slate-400">+</span>
+                            {r.requiredCategories.map((cat) => (
+                              <span
+                                key={cat}
+                                className="rounded border border-teal-300/30 bg-teal-500/15 px-1.5 py-0.5 text-[10px] font-bold text-teal-200"
+                              >
+                                {CATEGORY_LABELS[cat]}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
                       );
                     })}
                   </div>
                 </div>
-
-                <div className="space-y-3 lg:col-span-6">
-                  <div className="flex items-center justify-between">
+              ) : (
+                /* Fish & Ingredients Selection (available while waiting or in prep) */
+                <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
+                  <div className="space-y-3 lg:col-span-6">
                     <h3 className="text-sm font-extrabold text-white">
-                      2. 추가 식재료 선택 ({selectedIngIds.length}/3)
+                      1. 주재료 물고기 선택 ({fishInventory.length}마리 보유)
                     </h3>
-                    {room.status === 'waiting' ? (
-                      <button
-                        type="button"
-                        onClick={onOpenMarket}
-                        className="flex items-center gap-1 rounded-lg border border-amber-400/40 bg-amber-400/20 px-2.5 py-1 text-[11px] font-bold text-amber-200 hover:bg-amber-400/30 cursor-pointer"
-                      >
-                        <ShoppingBag className="h-3 w-3" /> 상점
-                      </button>
-                    ) : null}
-                  </div>
-                  {ownedIngredients.length === 0 ? (
-                    <div className="rounded-xl border border-dashed border-white/15 bg-slate-900/50 p-4 text-center text-xs text-slate-300">
-                      추가 식재료가 없습니다. 순수 생선 요리로 출전하거나 상점에서 구입하세요.
-                    </div>
-                  ) : (
-                    <div className="tuvalu-scroll grid max-h-40 grid-cols-2 gap-2 overflow-y-auto pr-1 sm:grid-cols-3">
-                      {ownedIngredients.map((item) => {
-                        const selected = selectedIngIds.includes(item.id);
+                    <div className="tuvalu-scroll grid max-h-44 grid-cols-1 gap-2 overflow-y-auto pr-1 sm:grid-cols-2">
+                      {fishInventory.map((f) => {
+                        const sp = FISH_CATALOG.find((c) => c.id === f.speciesId);
+                        if (!sp) return null;
+                        const tier = FISH_TIERS[sp.tier];
+                        const active = selectedFish?.uid === f.uid;
+                        const fresh = computeFishFreshness(f.caughtAt, nowMs);
                         return (
                           <button
-                            key={item.id}
+                            key={f.uid}
                             type="button"
                             disabled={Boolean(mySlot?.ready)}
-                            onClick={() => toggleIngredient(item.id)}
-                            className={`rounded-xl border p-2 text-left transition-colors ${
+                            onClick={() => setSelectedFishUid(f.uid)}
+                            className={`rounded-xl border p-2.5 text-left transition-colors ${
                               mySlot?.ready ? 'opacity-65 cursor-not-allowed' : 'cursor-pointer'
                             } ${
-                              selected
-                                ? 'border-teal-300 bg-teal-400/20'
-                                : 'border-white/10 bg-[#0c3747] hover:border-white/30'
+                              active
+                                ? 'border-amber-300 bg-amber-400/15'
+                                : 'border-white/10 bg-[#0c3747] hover:border-teal-300/40'
                             }`}
                           >
-                            <div className="flex items-center justify-between text-[10px] font-bold text-teal-200">
-                              <span>{CATEGORY_LABELS[item.category]}</span>
-                              <span>x{pantry[item.id] ?? 0}</span>
+                            <span
+                              className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-extrabold ${tier.bgClass} ${tier.textClass}`}
+                            >
+                              {tier.labelKo}
+                            </span>
+                            <div className="mt-0.5 text-xs font-bold text-white">{sp.nameKo}</div>
+                            <div className="text-[10px] text-slate-300">
+                              {f.weightKg.toFixed(1)}kg · +{tier.dishQualityBonus}
                             </div>
-                            <div className="mt-0.5 text-xs font-extrabold text-white line-clamp-1">
-                              {item.nameKo}
+                            <div className="mt-1.5">
+                              <div className="flex justify-between text-[9px] font-bold">
+                                <span className="text-slate-400">신선도</span>
+                                <span className={`tabular-nums ${fresh.colorClass}`}>{fresh.percent}%</span>
+                              </div>
+                              <div className="mt-0.5 h-1 w-full overflow-hidden rounded-full bg-slate-900">
+                                <div
+                                  className="h-full"
+                                  style={{ width: `${fresh.percent}%`, backgroundColor: fresh.barColorHex }}
+                                />
+                              </div>
                             </div>
                           </button>
                         );
                       })}
                     </div>
-                  )}
+                  </div>
+
+                  <div className="space-y-3 lg:col-span-6">
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-sm font-extrabold text-white">
+                        2. 추가 식재료 선택 ({selectedIngIds.length}/3)
+                      </h3>
+                      {room.status === 'waiting' ? (
+                        <button
+                          type="button"
+                          onClick={onOpenMarket}
+                          className="flex items-center gap-1 rounded-lg border border-amber-400/40 bg-amber-400/20 px-2.5 py-1 text-[11px] font-bold text-amber-200 hover:bg-amber-400/30 cursor-pointer"
+                        >
+                          <ShoppingBag className="h-3 w-3" /> 상점
+                        </button>
+                      ) : null}
+                    </div>
+                    {ownedIngredients.length === 0 ? (
+                      <div className="rounded-xl border border-dashed border-white/15 bg-slate-900/50 p-4 text-center text-xs text-slate-300">
+                        추가 식재료가 없습니다. 순수 생선 요리로 출전하거나 상점에서 구입하세요.
+                      </div>
+                    ) : (
+                      <div className="tuvalu-scroll grid max-h-44 grid-cols-2 gap-2 overflow-y-auto pr-1 sm:grid-cols-3">
+                        {ownedIngredients.map((item) => {
+                          const selected = selectedIngIds.includes(item.id);
+                          return (
+                            <button
+                              key={item.id}
+                              type="button"
+                              disabled={Boolean(mySlot?.ready)}
+                              onClick={() => toggleIngredient(item.id)}
+                              className={`rounded-xl border p-2 text-left transition-colors ${
+                                mySlot?.ready ? 'opacity-65 cursor-not-allowed' : 'cursor-pointer'
+                              } ${
+                                selected
+                                  ? 'border-teal-300 bg-teal-400/20'
+                                  : 'border-white/10 bg-[#0c3747] hover:border-white/30'
+                              }`}
+                            >
+                              <div className="flex items-center justify-between text-[10px] font-bold text-teal-200">
+                                <span>{CATEGORY_LABELS[item.category]}</span>
+                                <span>x{pantry[item.id] ?? 0}</span>
+                              </div>
+                              <div className="mt-0.5 text-xs font-extrabold text-white line-clamp-1">
+                                {item.nameKo}
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
                 </div>
-              </div>
+              )}
 
               {/* Footer Ready Action */}
               <div className="flex flex-wrap items-center justify-between gap-3 border-t border-white/10 pt-4">
-                <div className="text-xs text-cyan-100">
+                <div className="space-y-1 text-xs text-cyan-100">
                   {selectedSpecies ? (
                     <>
-                      예상 입맛 궁합:{' '}
-                      <strong className="text-amber-300">{palatePreviewScore}점 / 100</strong>
-                      {room.status === 'waiting'
-                        ? ' · 참가자가 들어오면 준비 완료를 눌러 동시 시작할 수 있습니다.'
-                        : mySlot?.ready && !oppSlot?.ready
-                          ? ` · ${oppSlot?.displayName ?? '상대방'}의 준비 완료를 기다리는 중...`
-                          : ' · 두 셰프 모두 준비 완료를 누르면 동시에 대결이 시작됩니다!'}
+                      <div>
+                        예상 입맛 궁합:{' '}
+                        <strong className="text-amber-300">{palatePreviewScore}점 / 100</strong>
+                        {selectedFreshness ? (
+                          <span className={`ml-1.5 font-bold ${selectedFreshness.colorClass}`}>
+                            · 신선도 {selectedFreshness.percent}%
+                          </span>
+                        ) : null}
+                      </div>
+                      {matchedHidden ? (
+                        <div className="text-[11px] font-extrabold text-amber-200">
+                          {isMatchedKnown
+                            ? `✨ 해금 레시피 발동: ${matchedHidden.nameKo}`
+                            : '✨ 미지의 비밀 레시피 조건과 어울리는 조합입니다! (조리 후 공개)'}
+                        </div>
+                      ) : null}
+                      <div className="text-[11px] text-slate-300">
+                        {room.status === 'waiting'
+                          ? '참가자가 들어오면 준비 완료를 눌러 동시 시작할 수 있습니다.'
+                          : mySlot?.ready && !oppSlot?.ready
+                            ? `${oppSlot?.displayName ?? '상대방'}의 준비 완료를 기다리는 중...`
+                            : '두 셰프 모두 준비 완료를 누르면 동시에 대결이 시작됩니다!'}
+                      </div>
                     </>
                   ) : (
                     '출전할 물고기를 선택하세요.'
@@ -793,7 +927,7 @@ export const RealtimeBattleModal: React.FC<RealtimeBattleModalProps> = ({
                     {mySlot?.ready ? '준비 완료! (취소하려면 클릭)' : '대결 준비 완료!'}
                   </button>
                 ) : (
-                  <div className="flex items-center gap-2 rounded-xl bg-amber-400/15 border border-amber-300/35 px-4 py-2 text-xs font-bold text-amber-200">
+                  <div className="flex items-center gap-2 rounded-xl border border-amber-300/35 bg-amber-400/15 px-4 py-2 text-xs font-bold text-amber-200">
                     <Loader2 className="h-4 w-4 animate-spin" /> 참가자 1명 대기 중...
                   </div>
                 )}

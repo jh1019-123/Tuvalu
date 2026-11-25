@@ -156,6 +156,26 @@ class SoundEngine {
     });
   }
 
+  public playSwat() {
+    this.playNoise(0.08, 1600, 0.14);
+    this.playTone(760, 0.08, 'triangle', 0.12, 1120, 0.01);
+  }
+
+  public playPestLand() {
+    this.playTone(190, 0.14, 'sawtooth', 0.08, 130);
+  }
+
+  public playRecipeUnlock() {
+    [587, 740, 880, 1174, 1480].forEach((n, idx) => {
+      this.playTone(n, 0.28, 'triangle', 0.14, undefined, idx * 0.075);
+    });
+  }
+
+  public playJudgeTasting() {
+    this.playTone(440, 0.14, 'sine', 0.09, 523);
+    this.playTone(587, 0.18, 'triangle', 0.09, 659, 0.12);
+  }
+
   public playClick() {
     this.playTone(620, 0.05, 'sine', 0.07, 740);
   }

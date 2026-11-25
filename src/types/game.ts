@@ -105,6 +105,51 @@ export interface OuterIslandMeta {
   rareIngredientIds: string[];
 }
 
+export type WeatherId = 'sunny' | 'squall' | 'gale' | 'heatwave' | 'starlit';
+
+export interface WeatherMeta {
+  id: WeatherId;
+  nameKo: string;
+  subtitleKo: string;
+  badgeEmoji: string;
+  preferredFlavor: FlavorTag;
+  secondaryFlavor: FlavorTag;
+  judgeNeedHintKo: string;
+  skyHex: number;
+  fogHex: number;
+  fogDensity: number;
+  sunHex: number;
+  sunIntensity: number;
+  hemiSkyHex: number;
+  hemiIntensity: number;
+  windStrength: number;
+  hasRain: boolean;
+}
+
+export type FreshnessGrade = 'fresh' | 'good' | 'aging' | 'stale';
+
+export interface FishFreshnessInfo {
+  percent: number; // 15 - 100
+  grade: FreshnessGrade;
+  labelKo: string;
+  ageMinutes: number;
+  perfectionDelta: number;
+  palateDelta: number;
+  colorClass: string;
+  barColorHex: string;
+}
+
+export interface HiddenRecipe {
+  id: string;
+  requiredFishTier: FishTier;
+  requiredCategories: IngredientCategory[];
+  nameKo: string;
+  dishTitleKo: string;
+  bonusPerfection: number;
+  bonusPalate: number;
+  loreKo: string;
+}
+
 export interface TuvaluJudge {
   id: string;
   nameKo: string;
@@ -136,6 +181,10 @@ export interface BattlePlan {
   ingredientIds: string[];
   judge: TuvaluJudge;
   rival: RivalChef;
+  weather: WeatherId;
+  fishFreshnessPct: number;
+  pestSwatted?: number;
+  pestMissed?: number;
 }
 
 export interface CookingStageScores {
@@ -155,7 +204,12 @@ export interface BattleVerdict {
   isDraw: boolean;
   rewardCoins: number;
   judgeCommentKo: string;
+  judgeTastingLineKo?: string;
   dishNameKo: string;
+  unlockedRecipe?: HiddenRecipe;
+  isNewlyUnlockedRecipe?: boolean;
+  freshnessInfo?: FishFreshnessInfo;
+  weatherId?: WeatherId;
 }
 
 export interface UserProfileData {

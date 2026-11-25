@@ -1,13 +1,35 @@
 import React, { useEffect, useState } from 'react';
-import { Award, CheckCircle2, Clock, Loader2, RotateCcw, Trophy } from 'lucide-react';
-import { FISH_CATALOG, INGREDIENT_CATALOG } from '../data/tuvaluData';
+import {
+  Award,
+  CheckCircle2,
+  Clock,
+  Loader2,
+  MessageCircleHeart,
+  RotateCcw,
+  SkipForward,
+  Sparkles,
+  Trophy,
+} from 'lucide-react';
+import { soundEngine } from '../audio/soundEngine';
+import {
+  FISH_CATALOG,
+  INGREDIENT_CATALOG,
+  WEATHER_CATALOG,
+} from '../data/tuvaluData';
 import { BattlePlan, BattlePlayerSlot, BattleVerdict, RealtimePlayerStage } from '../types/game';
 import { DishIllustrationSVG } from './DishIllustrationSVG';
+
+export interface JudgingPreviewCue {
+  tastingLineKo: string;
+  reactionLineKo: string;
+  tone: 'impressed' | 'good' | 'critical';
+}
 
 interface JudgingOverlayProps {
   phase: 'waiting_opponent' | 'judging' | 'result';
   plan: BattlePlan;
   verdict: BattleVerdict | null;
+  judgingCue?: JudgingPreviewCue | null;
   realtimePlayers?: {
     self: BattlePlayerSlot;
     opponent: BattlePlayerSlot;
@@ -16,6 +38,7 @@ interface JudgingOverlayProps {
   isSignedIn: boolean;
   rankPublished: boolean;
   publishingRank: boolean;
+  onSkipJudging?: () => void;
   onForceTimeoutFinish?: () => void;
   onPublishRank: () => void;
   onSignInAndPublish: () => void;
@@ -31,20 +54,28 @@ const OPP_STAGE_TEXT: Record<RealtimePlayerStage, string> = {
   done: '요리 완성!',
 };
 
+function toHex(num: number): string {
+  return `#${num.toString(16).padStart(6, '0')}`;
+}
+
 export const JudgingOverlay: React.FC<JudgingOverlayProps> = ({
   phase,
   plan,
   verdict,
+  judgingCue,
   realtimePlayers,
   isSignedIn,
   rankPublished,
   publishingRank,
+  onSkipJudging,
   onForceTimeoutFinish,
   onPublishRank,
   onSignInAndPublish,
   onFinish,
 }) => {
   const [waitedSec, setWaitedSec] = useState(0);
+  const [judgeBeat, setJudgeBeat] = useState<1 | 2>(1);
+  const [typedLen, setTypedLen] = useState(0);
 
   useEffect(() => {
     if (phase !== 'waiting_opponent') {
@@ -56,6 +87,45 @@ export const JudgingOverlay: React.FC<JudgingOverlayProps> = ({
     }, 1000);
     return () => clearInterval(iv);
   }, [phase]);
+
+  const activeJudgeLine =
+    judgeBeat === 1
+      ? judgingCue?.tastingLineKo || `"${plan.judge.tuvaluIntroKo}"`
+      : judgingCue?.reactionLineKo || '음~ 이 요리, 라군의 풍미가 제대로 배어있구려!';
+
+  // 2-beat tasting animation + typewriter speech bubble during 'judging'
+  useEffect(() => {
+    if (phase !== 'judging') {
+      setJudgeBeat(1);
+      setTypedLen(0);
+      return;
+    }
+    setJudgeBeat(1);
+    setTypedLen(0);
+    soundEngine.playJudgeTasting();
+
+    const beatTimer = window.setTimeout(() => {
+      setJudgeBeat(2);
+      setTypedLen(0);
+    }, 1450);
+
+    return () => clearTimeout(beatTimer);
+  }, [phase]);
+
+  useEffect(() => {
+    if (phase !== 'judging') return;
+    setTypedLen(0);
+    const iv = window.setInterval(() => {
+      setTypedLen((len) => {
+        if (len >= activeJudgeLine.length) {
+          clearInterval(iv);
+          return len;
+        }
+        return len + 2;
+      });
+    }, 24);
+    return () => clearInterval(iv);
+  }, [phase, judgeBeat, activeJudgeLine]);
 
   if (phase === 'waiting_opponent' && realtimePlayers) {
     return (
@@ -87,18 +157,77 @@ export const JudgingOverlay: React.FC<JudgingOverlayProps> = ({
   }
 
   if (phase === 'judging') {
+    const weatherMeta = WEATHER_CATALOG[plan.weather];
+    const tone = judgingCue?.tone ?? 'good';
+    const reactionEmoji =
+      judgeBeat === 1
+        ? '🍽️'
+        : tone === 'impressed'
+          ? '🤩'
+          : tone === 'critical'
+            ? '🧐'
+            : '😋';
+    const visibleLine = activeJudgeLine.slice(0, typedLen);
+
     return (
-      <div className="pointer-events-none fixed inset-x-0 bottom-8 z-30 flex justify-center px-4">
-        <div className="pointer-events-auto rounded-3xl border border-amber-300/45 bg-[#072633]/94 px-8 py-5 text-center shadow-2xl">
-          <div className="text-xs font-extrabold uppercase tracking-widest text-amber-300">
-            투발루 현지인 심사 진행 중
+      <div className="pointer-events-none fixed inset-x-0 bottom-6 z-30 flex justify-center px-4">
+        <div className="pointer-events-auto w-full max-w-2xl rounded-3xl border border-amber-300/50 bg-[#072633]/96 p-5 shadow-2xl">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-2.5 text-xs">
+            <span className="flex items-center gap-1.5 font-extrabold uppercase tracking-wider text-amber-300">
+              <MessageCircleHeart className="h-4 w-4" />
+              {judgeBeat === 1 ? '1단계 시식 · 향과 식감 음미 중...' : '2단계 평가 · 심사위원의 한마디!'}
+            </span>
+            <div className="flex items-center gap-2">
+              <span className="rounded-md bg-slate-900/80 px-2 py-0.5 text-[11px] font-bold text-cyan-200">
+                {weatherMeta.badgeEmoji} {weatherMeta.nameKo}
+              </span>
+              {onSkipJudging ? (
+                <button
+                  type="button"
+                  onClick={onSkipJudging}
+                  className="flex items-center gap-1 rounded-lg bg-slate-800 px-2.5 py-1 text-[11px] font-bold text-cyan-200 hover:bg-slate-700 cursor-pointer"
+                >
+                  <SkipForward className="h-3 w-3" /> 결과 보기
+                </button>
+              ) : null}
+            </div>
           </div>
-          <h3 className="mt-1 font-display text-2xl font-extrabold text-white">
-            {plan.judge.nameKo}님이 두 셰프의 요리를 시식하고 있습니다...
-          </h3>
-          <p className="mt-1.5 text-xs text-cyan-200">
-            "{plan.judge.tuvaluIntroKo}"
-          </p>
+
+          <div className="mt-4 flex items-center gap-4">
+            {/* Animated Judge Portrait Badge */}
+            <div
+              className={`relative flex h-16 w-16 shrink-0 items-center justify-center rounded-2xl border-2 shadow-lg transition-all duration-300 ${
+                judgeBeat === 2 && tone === 'impressed'
+                  ? 'scale-110 -rotate-3 border-amber-300'
+                  : judgeBeat === 2 && tone === 'critical'
+                    ? 'scale-95 rotate-3 border-rose-400'
+                    : 'animate-bounce border-teal-300'
+              }`}
+              style={{ backgroundColor: toHex(plan.judge.avatarColor) }}
+            >
+              <span
+                className="absolute -top-2.5 rounded-full px-2 py-0.5 text-[9px] font-black text-slate-950 shadow"
+                style={{ backgroundColor: toHex(plan.judge.crownColor) }}
+              >
+                심사
+              </span>
+              <span className="text-3xl leading-none">{reactionEmoji}</span>
+            </div>
+
+            {/* Typewriter Speech Bubble */}
+            <div className="relative flex-1 rounded-2xl border border-amber-300/35 bg-slate-900/80 px-4 py-3">
+              <div className="text-xs font-extrabold text-teal-300">
+                {plan.judge.nameKo}{' '}
+                <span className="font-normal text-slate-400">({plan.judge.roleKo})</span>
+              </div>
+              <p className="mt-1 min-h-[40px] text-sm sm:text-base font-bold leading-snug text-white">
+                "{visibleLine}"
+                {typedLen < activeJudgeLine.length ? (
+                  <span className="ml-0.5 inline-block h-4 w-1 animate-pulse bg-amber-300 align-middle" />
+                ) : null}
+              </p>
+            </div>
+          </div>
         </div>
       </div>
     );
@@ -131,6 +260,8 @@ export const JudgingOverlay: React.FC<JudgingOverlayProps> = ({
     ? opponentSlot.dishNameKo || `${rivalFish.nameKo} 투발루 특선 요리`
     : plan.rival.specialtyDishKo;
 
+  const weatherMeta = WEATHER_CATALOG[verdict.weatherId ?? plan.weather];
+
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/70 p-3 sm:p-4">
       <div className="tuvalu-scroll max-h-[92vh] w-full max-w-4xl overflow-y-auto rounded-3xl border border-amber-300/50 bg-[#082936] p-5 sm:p-6 shadow-2xl">
@@ -154,6 +285,25 @@ export const JudgingOverlay: React.FC<JudgingOverlayProps> = ({
             {verdict.won ? '요리 대결 승리!' : verdict.isDraw ? '무승부 명승부!' : '아쉬운 패배!'}
           </h2>
         </div>
+
+        {/* Hidden Recipe Unlock Celebration Banner */}
+        {verdict.unlockedRecipe ? (
+          <div className="mt-3 rounded-2xl border border-amber-300/65 bg-gradient-to-r from-amber-500/20 via-orange-500/15 to-rose-500/20 px-4 py-3 text-center shadow-lg">
+            <div className="flex items-center justify-center gap-1.5 text-xs font-black text-amber-300">
+              <Sparkles className="h-4 w-4" />
+              {verdict.isNewlyUnlockedRecipe
+                ? '신규 숨겨진 레시피 해금 성공!'
+                : '숨겨진 비밀 레시피 발동!'}
+            </div>
+            <div className="mt-0.5 text-base font-extrabold text-white">
+              {verdict.unlockedRecipe.nameKo}{' '}
+              <span className="text-xs font-bold text-emerald-300">
+                (완성 +{verdict.unlockedRecipe.bonusPerfection} · 입맛 +{verdict.unlockedRecipe.bonusPalate})
+              </span>
+            </div>
+            <p className="mt-0.5 text-xs text-amber-100/90">{verdict.unlockedRecipe.loreKo}</p>
+          </div>
+        ) : null}
 
         {/* Dish Showcase Comparison Grid */}
         <div className="mt-4 grid grid-cols-1 gap-4 md:grid-cols-2">
@@ -201,6 +351,18 @@ export const JudgingOverlay: React.FC<JudgingOverlayProps> = ({
                 ) : (
                   <span className="text-[11px] text-slate-400">추가 식재료 없이 순수 생선 구이로 조리됨</span>
                 )}
+              </div>
+
+              {/* Weather & Freshness Factors */}
+              <div className="mt-2.5 flex flex-wrap gap-1.5 text-[10px] font-bold">
+                <span className="rounded bg-slate-900/80 px-2 py-0.5 text-cyan-200">
+                  {weatherMeta.badgeEmoji} 날씨: {weatherMeta.nameKo}
+                </span>
+                {verdict.freshnessInfo ? (
+                  <span className={`rounded bg-slate-900/80 px-2 py-0.5 ${verdict.freshnessInfo.colorClass}`}>
+                    신선도 {verdict.freshnessInfo.percent}% ({verdict.freshnessInfo.labelKo})
+                  </span>
+                ) : null}
               </div>
             </div>
 
@@ -286,7 +448,12 @@ export const JudgingOverlay: React.FC<JudgingOverlayProps> = ({
 
         {/* Judge Comment & Reward */}
         <div className="mt-4 rounded-2xl bg-slate-900/75 p-4 text-sm leading-relaxed text-slate-200">
-          "{verdict.judgeCommentKo}"
+          {verdict.judgeTastingLineKo ? (
+            <div className="mb-1 text-xs font-bold text-teal-300">
+              시식평: "{verdict.judgeTastingLineKo}"
+            </div>
+          ) : null}
+          <div>최종 평: "{verdict.judgeCommentKo}"</div>
           <div className="mt-1.5 text-xs font-bold text-amber-300 tabular-nums">
             상금 획득: +{verdict.rewardCoins} T$
           </div>
@@ -296,7 +463,7 @@ export const JudgingOverlay: React.FC<JudgingOverlayProps> = ({
         <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
           {isSignedIn ? (
             rankPublished ? (
-              <div className="flex items-center gap-1.5 rounded-xl bg-emerald-500/20 border border-emerald-400/40 px-3.5 py-2 text-xs font-bold text-emerald-200">
+              <div className="flex items-center gap-1.5 rounded-xl border border-emerald-400/40 bg-emerald-500/20 px-3.5 py-2 text-xs font-bold text-emerald-200">
                 <CheckCircle2 className="h-4 w-4" /> 승리 수가 개인정보 및 랭킹에 반영되었습니다!
               </div>
             ) : (
@@ -331,3 +498,4 @@ export const JudgingOverlay: React.FC<JudgingOverlayProps> = ({
     </div>
   );
 };
+

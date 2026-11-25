@@ -1,7 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Beef, Check, Flame, Gem, Leaf, SkipForward, Sparkles, Swords } from 'lucide-react';
 import { soundEngine } from '../audio/soundEngine';
-import { FISH_TIERS, FLAVOR_LABELS, INGREDIENT_CATALOG } from '../data/tuvaluData';
+import {
+  FISH_TIERS,
+  FLAVOR_LABELS,
+  INGREDIENT_CATALOG,
+  WEATHER_CATALOG,
+  getJudgeNeedsForWeather,
+} from '../data/tuvaluData';
 import { BattlePlan, BattlePlayerSlot, IngredientCategory } from '../types/game';
 
 interface BattleIntroCutsceneProps {
@@ -80,6 +86,12 @@ export const BattleIntroCutscene: React.FC<BattleIntroCutsceneProps> = ({
   const [droppedCount, setDroppedCount] = useState(0);
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
 
+  const weatherMeta = WEATHER_CATALOG[plan.weather];
+  const judgeWeatherNeeds = useMemo(
+    () => getJudgeNeedsForWeather(plan.judge, plan.weather),
+    [plan.judge, plan.weather],
+  );
+
   useEffect(() => {
     completedRef.current = false;
     setDroppedCount(0);
@@ -139,11 +151,11 @@ export const BattleIntroCutscene: React.FC<BattleIntroCutsceneProps> = ({
         <div className="mx-auto w-full max-w-3xl rounded-2xl border border-amber-300/45 bg-[#072633]/94 px-4 py-3 shadow-2xl">
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 pb-2 text-[11px]">
             <span className="font-extrabold text-amber-300">
-              실시간 1:1 요리 대결 개시 · 방 {realtimePlayers.roomCode}
+              실시간 1:1 요리 대결 개시 · 방 {realtimePlayers.roomCode} · {weatherMeta.badgeEmoji} {weatherMeta.nameKo}
             </span>
             <div className="flex items-center gap-1.5">
               <span className="font-bold text-cyan-200">{plan.judge.nameKo} 선호:</span>
-              {plan.judge.preferredFlavors.map((f) => (
+              {judgeWeatherNeeds.effectiveFlavors.map((f) => (
                 <span
                   key={f}
                   className="rounded bg-slate-900/90 px-1.5 py-0.5 text-[10px] font-bold text-teal-200 border border-white/10"
@@ -205,7 +217,9 @@ export const BattleIntroCutscene: React.FC<BattleIntroCutsceneProps> = ({
               <Swords className="h-5 w-5" />
             </div>
             <div>
-              <div className="text-[11px] font-extrabold text-amber-300">투발루 요리 대결 개시!</div>
+              <div className="text-[11px] font-extrabold text-amber-300">
+                투발루 요리 대결 개시! · {weatherMeta.badgeEmoji} {weatherMeta.nameKo}
+              </div>
               <div className="text-sm font-black text-white">
                 나 <span className="text-amber-300">VS</span> {plan.rival.nameKo}
               </div>
@@ -213,7 +227,7 @@ export const BattleIntroCutscene: React.FC<BattleIntroCutsceneProps> = ({
           </div>
           <div className="flex flex-wrap items-center gap-1.5 text-xs">
             <span className="font-bold text-cyan-200">{plan.judge.nameKo} 선호:</span>
-            {plan.judge.preferredFlavors.map((f) => (
+            {judgeWeatherNeeds.effectiveFlavors.map((f) => (
               <span
                 key={f}
                 className="rounded-md bg-slate-900/90 px-2 py-0.5 text-[11px] font-bold text-teal-200 border border-white/10"

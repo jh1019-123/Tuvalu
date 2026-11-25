@@ -5,6 +5,7 @@ import {
   FISH_TIERS,
   INGREDIENT_CATALOG,
   OUTER_ISLANDS,
+  WEATHER_CATALOG,
 } from '../data/tuvaluData';
 import {
   CookingStage,
@@ -14,6 +15,7 @@ import {
   IslandId,
   MapZone,
   RivalChef,
+  WeatherId,
 } from '../types/game';
 import {
   buildBoatDockGroup,
@@ -158,6 +160,21 @@ export class TuvaluWorld {
   private cameraLookCurrent = new THREE.Vector3(0, 1.4, 2);
   private shakeIntensity = 0;
   private nearStation: string | null = null;
+
+  // Dynamic Weather & Judge Evaluation Animation
+  private hemiLight!: THREE.HemisphereLight;
+  private sunLight!: THREE.DirectionalLight;
+  private currentWeather: WeatherId = 'sunny';
+  private weatherWindStrength = 1.0;
+  private skyTargetColor = new THREE.Color(0x7be0ef);
+  private fogTargetColor = new THREE.Color(0x7be0ef);
+  private sunTargetColor = new THREE.Color(0xfff1d6);
+  private hemiTargetColor = new THREE.Color(0xa5f3fc);
+  private rainLines: THREE.LineSegments | null = null;
+  private rainPositions: Float32Array | null = null;
+  private rainCount = 160;
+  private judgingTone: 'impressed' | 'good' | 'critical' = 'good';
+  private judgingAnimTimer = 0;
 
   // Pooled Particles
   private particles: ParticleItem[] = [];
@@ -316,10 +333,11 @@ export class TuvaluWorld {
   }
 
   private setupLighting() {
-    const hemi = new THREE.HemisphereLight(0xa5f3fc, 0x0e7490, 0.9);
-    this.scene.add(hemi);
+    this.hemiLight = new THREE.HemisphereLight(0xa5f3fc, 0x0e7490, 0.9);
+    this.scene.add(this.hemiLight);
 
-    const sun = new THREE.DirectionalLight(0xfff1d6, 2.0);
+    this.sunLight = new THREE.DirectionalLight(0xfff1d6, 2.0);
+    const sun = this.sunLight;
     sun.position.set(22, 34, 18);
     sun.castShadow = true;
     sun.shadow.mapSize.width = 1024;
@@ -342,6 +360,33 @@ export class TuvaluWorld {
     const kitchenFill = new THREE.PointLight(0xffedd5, 1.4, 16, 1.2);
     kitchenFill.position.set(0, 4.2, -8.5);
     this.scene.add(kitchenFill);
+
+    // Lightweight pooled 3D rain streak system for Tropical Squall weather
+    const posArr = new Float32Array(this.rainCount * 6);
+    for (let i = 0; i < this.rainCount; i++) {
+      const rx = (Math.random() - 0.5) * 44;
+      const ry = Math.random() * 20;
+      const rz = (Math.random() - 0.5) * 44;
+      const idx = i * 6;
+      posArr[idx] = rx;
+      posArr[idx + 1] = ry;
+      posArr[idx + 2] = rz;
+      posArr[idx + 3] = rx - 0.18;
+      posArr[idx + 4] = ry - 0.9;
+      posArr[idx + 5] = rz + 0.08;
+    }
+    const rainGeo = new THREE.BufferGeometry();
+    rainGeo.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+    const rainMat = new THREE.LineBasicMaterial({
+      color: 0xdbeafe,
+      transparent: true,
+      opacity: 0.55,
+    });
+    this.rainPositions = posArr;
+    this.rainLines = new THREE.LineSegments(rainGeo, rainMat);
+    this.rainLines.frustumCulled = false;
+    this.rainLines.visible = false;
+    this.scene.add(this.rainLines);
   }
 
   private buildEnvironment() {
@@ -965,6 +1010,9 @@ export class TuvaluWorld {
       this.setCuttingBoardFish(null);
       this.player.root.position.set(0.3, 0.91, -6.2);
       this.player.root.rotation.y = Math.PI;
+      if (stage === 'judging') {
+        this.judgingAnimTimer = 0;
+      }
       this.showPlatedDishes(species ?? FISH_CATALOG[0], playerIngredientIds, rival);
     } else {
       this.clearIntroShowcase();
@@ -973,6 +1021,25 @@ export class TuvaluWorld {
       this.setCuttingBoardFish(null);
       this.clearPlatedDishes();
     }
+  }
+
+  public setWeather(weather: WeatherId) {
+    if (this.currentWeather === weather) return;
+    this.currentWeather = weather;
+    const meta = WEATHER_CATALOG[weather];
+    this.skyTargetColor.setHex(meta.skyHex);
+    this.fogTargetColor.setHex(meta.fogHex);
+    this.sunTargetColor.setHex(meta.sunHex);
+    this.hemiTargetColor.setHex(meta.hemiSkyHex);
+    this.weatherWindStrength = meta.windStrength;
+    if (this.rainLines) {
+      this.rainLines.visible = meta.hasRain;
+    }
+  }
+
+  public setJudgingTone(tone: 'impressed' | 'good' | 'critical') {
+    this.judgingTone = tone;
+    this.judgingAnimTimer = 0;
   }
 
   public setHeatLevel(heat: number) {
@@ -1310,9 +1377,52 @@ export class TuvaluWorld {
     this.elapsed += dt;
     this.waterUniforms.uTime.value = this.elapsed;
 
-    // Gentle palm tree breeze
+    // Smooth atmospheric weather transitions
+    const wMeta = WEATHER_CATALOG[this.currentWeather];
+    const lerpRate = Math.min(1, dt * 1.8);
+    if (this.scene.background instanceof THREE.Color) {
+      this.scene.background.lerp(this.skyTargetColor, lerpRate);
+    }
+    if (this.scene.fog instanceof THREE.FogExp2) {
+      this.scene.fog.color.lerp(this.fogTargetColor, lerpRate);
+      this.scene.fog.density = THREE.MathUtils.damp(this.scene.fog.density, wMeta.fogDensity, 2.5, dt);
+    }
+    if (this.sunLight) {
+      this.sunLight.color.lerp(this.sunTargetColor, lerpRate);
+      this.sunLight.intensity = THREE.MathUtils.damp(this.sunLight.intensity, wMeta.sunIntensity, 2.5, dt);
+    }
+    if (this.hemiLight) {
+      this.hemiLight.color.lerp(this.hemiTargetColor, lerpRate);
+      this.hemiLight.intensity = THREE.MathUtils.damp(this.hemiLight.intensity, wMeta.hemiIntensity, 2.5, dt);
+    }
+
+    // Active 3D tropical rain streak animation around camera target
+    if (this.rainLines && this.rainLines.visible && this.rainPositions) {
+      const cx = this.cameraLookCurrent.x;
+      const cz = this.cameraLookCurrent.z;
+      const pos = this.rainPositions;
+      for (let i = 0; i < this.rainCount; i++) {
+        const idx = i * 6;
+        pos[idx] -= 3.2 * dt;
+        pos[idx + 1] -= 23.0 * dt;
+        pos[idx + 2] += 1.2 * dt;
+        if (pos[idx + 1] < 0) {
+          pos[idx] = cx + (Math.random() - 0.5) * 38;
+          pos[idx + 1] = 16 + Math.random() * 8;
+          pos[idx + 2] = cz + (Math.random() - 0.5) * 38;
+        }
+        pos[idx + 3] = pos[idx] - 0.22;
+        pos[idx + 4] = pos[idx + 1] - 0.95;
+        pos[idx + 5] = pos[idx + 2] + 0.08;
+      }
+      this.rainLines.geometry.attributes.position.needsUpdate = true;
+    }
+
+    // Palm tree breeze (amplified during Gale / Squall)
+    const windFreq = 0.9 * (0.85 + this.weatherWindStrength * 0.45);
+    const windAmp = 0.035 * this.weatherWindStrength;
     for (let i = 0; i < this.palmTrees.length; i++) {
-      this.palmTrees[i].rotation.z = Math.sin(this.elapsed * 0.9 + i) * 0.035;
+      this.palmTrees[i].rotation.z = Math.sin(this.elapsed * windFreq + i) * windAmp;
     }
 
     // Gather node crystal gentle rotation (paused/slower when on cooldown)
@@ -1776,12 +1886,53 @@ export class TuvaluWorld {
       this.player.rightArm.rotation.x = THREE.MathUtils.damp(this.player.rightArm.rotation.x, -Math.sin(this.elapsed * 2) * 0.05, 8, dt);
     }
 
-    // Judge NPC gentle idle / tasting nod
-    if (this.cookingStage !== 'result') {
-      this.judgeNpc.head.rotation.x =
-        this.cookingStage === 'judging'
-          ? Math.sin(this.elapsed * 6) * 0.14
-          : Math.sin(this.elapsed * 1.8) * 0.04;
+    // Judge NPC animated tasting & situational reaction sequence
+    if (this.cookingStage === 'judging') {
+      this.judgingAnimTimer += dt;
+      if (this.judgingAnimTimer < 1.35) {
+        // Beat 1: Lean forward toward plates, lift spoon/hand to taste & savor aroma
+        const chew = Math.sin(this.judgingAnimTimer * 10);
+        this.judgeNpc.root.rotation.x = THREE.MathUtils.damp(this.judgeNpc.root.rotation.x, 0.14, 8, dt);
+        this.judgeNpc.head.rotation.x = 0.18 + chew * 0.1;
+        this.judgeNpc.head.rotation.y = Math.sin(this.judgingAnimTimer * 3.2) * 0.12;
+        this.judgeNpc.rightArm.rotation.x = -1.35 + Math.sin(this.judgingAnimTimer * 5.5) * 0.25;
+        this.judgeNpc.rightArm.rotation.z = -0.35;
+        this.judgeNpc.leftArm.rotation.x = -0.35;
+      } else {
+        // Beat 2: React emotionally based on dish outcome
+        const t2 = this.judgingAnimTimer - 1.35;
+        this.judgeNpc.root.rotation.x = THREE.MathUtils.damp(this.judgeNpc.root.rotation.x, 0, 8, dt);
+        if (this.judgingTone === 'impressed') {
+          this.judgeNpc.head.rotation.x = Math.sin(t2 * 9) * 0.16;
+          this.judgeNpc.head.rotation.y = 0;
+          this.judgeNpc.leftArm.rotation.x = -1.1;
+          this.judgeNpc.rightArm.rotation.x = -1.1;
+          this.judgeNpc.leftArm.rotation.z = -0.35 + Math.sin(t2 * 14) * 0.22;
+          this.judgeNpc.rightArm.rotation.z = 0.35 - Math.sin(t2 * 14) * 0.22;
+        } else if (this.judgingTone === 'critical') {
+          this.judgeNpc.head.rotation.x = 0.12;
+          this.judgeNpc.head.rotation.y = Math.sin(t2 * 6.5) * 0.24;
+          this.judgeNpc.rightArm.rotation.x = -0.95;
+          this.judgeNpc.rightArm.rotation.z = -0.25;
+          this.judgeNpc.leftArm.rotation.x = -0.45;
+          this.judgeNpc.leftArm.rotation.z = 0.2;
+        } else {
+          this.judgeNpc.head.rotation.x = Math.sin(t2 * 5.5) * 0.12;
+          this.judgeNpc.head.rotation.y = Math.sin(t2 * 2.2) * 0.08;
+          this.judgeNpc.rightArm.rotation.x = -0.75 + Math.sin(t2 * 4) * 0.12;
+          this.judgeNpc.rightArm.rotation.z = -0.1;
+          this.judgeNpc.leftArm.rotation.x = -0.3;
+          this.judgeNpc.leftArm.rotation.z = 0;
+        }
+      }
+    } else if (this.cookingStage !== 'result') {
+      this.judgeNpc.root.rotation.x = THREE.MathUtils.damp(this.judgeNpc.root.rotation.x, 0, 8, dt);
+      this.judgeNpc.head.rotation.y = THREE.MathUtils.damp(this.judgeNpc.head.rotation.y, 0, 8, dt);
+      this.judgeNpc.head.rotation.x = Math.sin(this.elapsed * 1.8) * 0.04;
+      this.judgeNpc.leftArm.rotation.x = THREE.MathUtils.damp(this.judgeNpc.leftArm.rotation.x, 0, 8, dt);
+      this.judgeNpc.rightArm.rotation.x = THREE.MathUtils.damp(this.judgeNpc.rightArm.rotation.x, 0, 8, dt);
+      this.judgeNpc.leftArm.rotation.z = THREE.MathUtils.damp(this.judgeNpc.leftArm.rotation.z, 0, 8, dt);
+      this.judgeNpc.rightArm.rotation.z = THREE.MathUtils.damp(this.judgeNpc.rightArm.rotation.z, 0, 8, dt);
     }
   }
 
@@ -2186,13 +2337,13 @@ export class TuvaluWorld {
     this.renderer.domElement.removeEventListener('pointerdown', this.onPointerDown);
 
     this.scene.traverse((obj) => {
-      if ((obj as THREE.Mesh).isMesh) {
-        const mesh = obj as THREE.Mesh;
-        mesh.geometry?.dispose();
-        if (Array.isArray(mesh.material)) {
-          mesh.material.forEach((m) => m.dispose());
+      if ((obj as THREE.Mesh).isMesh || (obj as THREE.LineSegments).isLineSegments) {
+        const renderable = obj as THREE.Mesh | THREE.LineSegments;
+        renderable.geometry?.dispose();
+        if (Array.isArray(renderable.material)) {
+          renderable.material.forEach((m) => m.dispose());
         } else {
-          mesh.material?.dispose();
+          renderable.material?.dispose();
         }
       }
     });
