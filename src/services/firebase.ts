@@ -523,7 +523,11 @@ export class BattleRoomError extends Error {
 }
 
 export function formatBattleErrorKo(err: unknown, fallback: string): string {
-  if (err instanceof BattleRoomError || err instanceof AuthSignInError) {
+  if (
+    err instanceof BattleRoomError ||
+    err instanceof AuthSignInError ||
+    (err instanceof Error && err.name === 'BattleRoomError')
+  ) {
     return err.message;
   }
   if (err instanceof Error) {

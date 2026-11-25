@@ -5,12 +5,10 @@ import {
   CheckCircle2,
   Copy,
   DoorOpen,
-  ExternalLink,
   Flame,
   KeyRound,
   Loader2,
   Lock,
-  LogIn,
   PlusCircle,
   Radio,
   ShoppingBag,
@@ -35,19 +33,16 @@ import {
   getChefTitleForWins,
   getJudgeNeedsForWeather,
 } from '../data/tuvaluData';
+import { formatBattleErrorKo } from '../services/firebase';
 import {
-  AuthSignInError,
   cancelOrLeaveBattleRoom,
   createBattleRoom,
   findOrCreateMatchmakingRoom,
-  formatBattleErrorKo,
-  isEmbeddedFrame,
-  isInAppBrowser,
   joinBattleRoomByCode,
   normalizeRoomCode,
   subscribeBattleRoom,
   updateRealtimePrepChoice,
-} from '../services/firebase';
+} from '../services/realtimeBattle';
 import {
   BattlePlayerSlot,
   BattleRoomData,
@@ -66,7 +61,7 @@ interface RealtimeBattleModalProps {
   discoveredRecipeIds: string[];
   initialRoom: BattleRoomData | null;
   initialRole: 'host' | 'guest' | null;
-  onSignIn: () => Promise<void>;
+  onUpdateDisplayName: (name: string) => void;
   onRoomBound: (room: BattleRoomData | null, role: 'host' | 'guest' | null) => void;
   onBattleLaunch: (
     room: BattleRoomData,
@@ -89,7 +84,7 @@ export const RealtimeBattleModal: React.FC<RealtimeBattleModalProps> = ({
   discoveredRecipeIds,
   initialRoom,
   initialRole,
-  onSignIn,
+  onUpdateDisplayName,
   onRoomBound,
   onBattleLaunch,
   onOpenMarket,
@@ -99,16 +94,19 @@ export const RealtimeBattleModal: React.FC<RealtimeBattleModalProps> = ({
   const [lobbyTab, setLobbyTab] = useState<'join' | 'create'>('join');
   const [roomCodeInput, setRoomCodeInput] = useState('');
   const [allowRandomJoin, setAllowRandomJoin] = useState(false);
+  const [nicknameInput, setNicknameInput] = useState(profile.displayName);
+  const [nicknameSaved, setNicknameSaved] = useState(false);
 
   const [room, setRoom] = useState<BattleRoomData | null>(initialRoom);
   const [role, setRole] = useState<'host' | 'guest' | null>(initialRole);
   const [busy, setBusy] = useState(false);
-  const [signingIn, setSigningIn] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
-  const [urlCopied, setUrlCopied] = useState(false);
-  const [showExternalHelp, setShowExternalHelp] = useState(() => isInAppBrowser());
   const [showRecipeHints, setShowRecipeHints] = useState(false);
+
+  useEffect(() => {
+    setNicknameInput(profile.displayName);
+  }, [profile.displayName]);
 
   // Dish Selection State inside Waiting / Prep Room
   const [selectedFishUid, setSelectedFishUid] = useState<string>(fishInventory[0]?.uid ?? '');
@@ -234,23 +232,23 @@ export const RealtimeBattleModal: React.FC<RealtimeBattleModalProps> = ({
     });
   };
 
-  const handleGoogleSignIn = async () => {
-    setSigningIn(true);
-    setErrorMsg(null);
-    try {
-      await onSignIn();
-    } catch (err) {
-      if (err instanceof AuthSignInError && err.code === 'auth/redirect-started') {
-        setErrorMsg(err.message);
-        return;
-      }
-      if (err instanceof AuthSignInError && err.needsExternalBrowser) {
-        setShowExternalHelp(true);
-      }
-      setErrorMsg(formatBattleErrorKo(err, 'Google 로그인에 실패했거나 창이 닫혔습니다.'));
-    } finally {
-      setSigningIn(false);
+  const buildEffectiveProfile = (): UserProfileData => {
+    const cleanName = nicknameInput.trim().slice(0, 32) || profile.displayName || '푸나푸티 셰프';
+    if (cleanName !== profile.displayName) {
+      onUpdateDisplayName(cleanName);
     }
+    return {
+      ...profile,
+      displayName: cleanName,
+    };
+  };
+
+  const handleSaveNickname = () => {
+    const clean = nicknameInput.trim().slice(0, 32) || '푸나푸티 셰프';
+    setNicknameInput(clean);
+    onUpdateDisplayName(clean);
+    setNicknameSaved(true);
+    window.setTimeout(() => setNicknameSaved(false), 1500);
   };
 
   const handleCreateRoom = async () => {
@@ -262,7 +260,8 @@ export const RealtimeBattleModal: React.FC<RealtimeBattleModalProps> = ({
     setErrorMsg(null);
     try {
       const randomJudge = TUVALU_JUDGES[Math.floor(Math.random() * TUVALU_JUDGES.length)];
-      const created = await createBattleRoom(profile, allowRandomJoin, randomJudge.id);
+      const effectiveProfile = buildEffectiveProfile();
+      const created = await createBattleRoom(effectiveProfile, allowRandomJoin, randomJudge.id);
       setRoom(created);
       setRole('host');
       onRoomBound(created, 'host');
@@ -281,7 +280,8 @@ export const RealtimeBattleModal: React.FC<RealtimeBattleModalProps> = ({
     setBusy(true);
     setErrorMsg(null);
     try {
-      const joined = await joinBattleRoomByCode(roomCodeInput, profile);
+      const effectiveProfile = buildEffectiveProfile();
+      const joined = await joinBattleRoomByCode(roomCodeInput, effectiveProfile);
       setRoom(joined);
       setRole('guest');
       onRoomBound(joined, 'guest');
@@ -301,7 +301,8 @@ export const RealtimeBattleModal: React.FC<RealtimeBattleModalProps> = ({
     setErrorMsg(null);
     try {
       const randomJudge = TUVALU_JUDGES[Math.floor(Math.random() * TUVALU_JUDGES.length)];
-      const res = await findOrCreateMatchmakingRoom(profile, randomJudge.id);
+      const effectiveProfile = buildEffectiveProfile();
+      const res = await findOrCreateMatchmakingRoom(effectiveProfile, randomJudge.id);
       setRoom(res.room);
       setRole(res.role);
       onRoomBound(res.room, res.role);
@@ -319,7 +320,7 @@ export const RealtimeBattleModal: React.FC<RealtimeBattleModalProps> = ({
     setBusy(true);
     setErrorMsg(null);
     try {
-      const updated = await updateRealtimePrepChoice(room.roomId, role, {
+      const updated = await updateRealtimePrepChoice(room.roomId, role, profile.uid, {
         fishSpeciesId: selectedSpecies.id,
         fishWeightKg: selectedFish.weightKg,
         ingredientIds: selectedIngIds,
@@ -336,7 +337,7 @@ export const RealtimeBattleModal: React.FC<RealtimeBattleModalProps> = ({
   const handleLeaveRoom = async () => {
     if (room && role) {
       try {
-        await cancelOrLeaveBattleRoom(room.roomId, role);
+        await cancelOrLeaveBattleRoom(room.roomId, role, profile.uid);
       } catch {
         // ignore
       }
@@ -478,59 +479,7 @@ export const RealtimeBattleModal: React.FC<RealtimeBattleModalProps> = ({
             </div>
           ) : null}
 
-          {/* Auth Required View */}
-          {!isSignedIn ? (
-            <div className="rounded-2xl border border-amber-300/40 bg-[#0c3747] p-6 text-center">
-              <UserCheck className="mx-auto h-10 w-10 text-amber-300" />
-              <h3 className="mt-3 font-display text-lg font-extrabold text-white">
-                실시간 대결을 위해 Google 로그인이 필요합니다
-              </h3>
-              <p className="mt-1.5 text-xs text-slate-300">
-                로그인하면 나의 셰프 프로필(닉네임, 전적, 최고 점수)이 실시간 방에 연동되어 상대와 겨룰 수 있습니다.
-              </p>
-              <button
-                type="button"
-                disabled={signingIn}
-                onClick={() => void handleGoogleSignIn()}
-                className="mt-4 inline-flex items-center gap-2 rounded-2xl bg-amber-400 px-6 py-3 text-sm font-extrabold text-slate-950 hover:bg-amber-300 cursor-pointer disabled:opacity-60"
-              >
-                <LogIn className="h-4 w-4" />
-                {signingIn ? '로그인 창 여는 중...' : 'Google 로그인 후 입장하기'}
-              </button>
-
-              {(showExternalHelp || isEmbeddedFrame()) && typeof window !== 'undefined' ? (
-                <div className="mt-4 rounded-xl border border-cyan-300/30 bg-slate-900/70 p-3.5 text-left text-xs text-cyan-100">
-                  <div className="font-extrabold text-amber-200">
-                    로그인 창이 열리지 않나요? (모바일·인앱 브라우저·팝업 차단)
-                  </div>
-                  <p className="mt-1 text-[11px] text-slate-300">
-                    카카오톡/인스타그램 인앱 브라우저나 팝업 차단 환경에서는 Google 로그인이 열리지 않을 수 있습니다. 아래 버튼으로 Chrome/Safari 새 탭에서 열어주세요.
-                  </p>
-                  <div className="mt-2.5 flex flex-wrap gap-2">
-                    <a
-                      href={window.location.href}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-cyan-400 px-3 py-1.5 text-xs font-extrabold text-slate-950 hover:bg-cyan-300"
-                    >
-                      <ExternalLink className="h-3.5 w-3.5" /> 새 탭/외부 브라우저로 열기
-                    </a>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        void navigator.clipboard?.writeText(window.location.href);
-                        setUrlCopied(true);
-                        window.setTimeout(() => setUrlCopied(false), 1800);
-                      }}
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-slate-800 px-3 py-1.5 text-xs font-bold text-slate-200 hover:bg-slate-700 cursor-pointer"
-                    >
-                      <Copy className="h-3.5 w-3.5" /> {urlCopied ? '주소 복사됨!' : '게임 주소 복사'}
-                    </button>
-                  </div>
-                </div>
-              ) : null}
-            </div>
-          ) : fishInventory.length === 0 && !room ? (
+          {fishInventory.length === 0 && !room ? (
             /* No Fish Warning */
             <div className="rounded-2xl border border-dashed border-cyan-400/45 bg-slate-900/60 p-6 text-center">
               <h3 className="text-base font-extrabold text-white">
@@ -550,21 +499,51 @@ export const RealtimeBattleModal: React.FC<RealtimeBattleModalProps> = ({
           ) : !room ? (
             /* === LOBBY: CREATE ROOM vs JOIN ROOM (CODE or RANDOM MATCH) === */
             <div className="space-y-5">
-              {/* My Profile Preview */}
-              <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-teal-300/35 bg-[#0c3747] px-5 py-3.5">
-                <div>
-                  <div className="text-[11px] font-bold text-teal-300">내 출전 프로필</div>
-                  <div className="text-base font-black text-white">
-                    {profile.displayName}{' '}
-                    <span className="text-xs font-bold text-cyan-200">
-                      ({getChefTitleForWins(profile.wins)})
-                    </span>
+              {/* My Profile Preview + Inline Nickname Editor (Login-Free) */}
+              <div className="space-y-3 rounded-2xl border border-teal-300/35 bg-[#0c3747] px-5 py-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <div className="flex items-center gap-2 text-[11px] font-bold text-teal-300">
+                      <UserCheck className="h-3.5 w-3.5" />
+                      <span>내 출전 프로필</span>
+                      <span className="rounded-md bg-emerald-500/20 px-2 py-0.5 text-[10px] font-extrabold text-emerald-200">
+                        {isSignedIn ? 'Google 계정 연동됨' : '로그인 없이 바로 대결 가능'}
+                      </span>
+                    </div>
+                    <div className="mt-0.5 text-base font-black text-white">
+                      {profile.displayName}{' '}
+                      <span className="text-xs font-bold text-cyan-200">
+                        ({getChefTitleForWins(profile.wins)})
+                      </span>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-4 text-xs font-bold tabular-nums">
+                    <span className="text-amber-300">{profile.wins}승 {profile.losses}패</span>
+                    <span className="text-cyan-200">최고 점수 {profile.bestDishScore}점</span>
+                    <span className="text-teal-200">보유 물고기 {fishInventory.length}마리</span>
                   </div>
                 </div>
-                <div className="flex items-center gap-4 text-xs font-bold tabular-nums">
-                  <span className="text-amber-300">{profile.wins}승 {profile.losses}패</span>
-                  <span className="text-cyan-200">최고 점수 {profile.bestDishScore}점</span>
-                  <span className="text-teal-200">보유 물고기 {fishInventory.length}마리</span>
+
+                <div className="flex flex-wrap items-center gap-2 border-t border-white/10 pt-3">
+                  <label className="text-[11px] font-bold text-cyan-200">상대에게 표시할 셰프 닉네임:</label>
+                  <input
+                    type="text"
+                    maxLength={24}
+                    value={nicknameInput}
+                    onChange={(e) => setNicknameInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') handleSaveNickname();
+                    }}
+                    placeholder="닉네임 입력"
+                    className="min-w-[160px] flex-1 rounded-xl border border-white/15 bg-slate-900/90 px-3 py-1.5 text-xs font-bold text-white focus:border-teal-300 focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleSaveNickname}
+                    className="rounded-xl bg-teal-400 px-3.5 py-1.5 text-xs font-extrabold text-slate-950 hover:bg-teal-300 cursor-pointer"
+                  >
+                    {nicknameSaved ? '저장됨!' : '닉네임 적용'}
+                  </button>
                 </div>
               </div>
 

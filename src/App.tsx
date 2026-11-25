@@ -56,8 +56,6 @@ import {
 } from './data/tuvaluData';
 import {
   auth,
-  cancelOrLeaveBattleRoom,
-  finalizeTimedOutRealtimeBattle,
   formatBattleErrorKo,
   loadUserProfile,
   publishToLeaderboard,
@@ -65,10 +63,14 @@ import {
   saveUserProfile,
   signInWithGoogle,
   signOutUser,
+} from './services/firebase';
+import {
+  cancelOrLeaveBattleRoom,
+  finalizeTimedOutRealtimeBattle,
   submitRealtimeBattleFinish,
   subscribeBattleRoom,
   updateRealtimeBattleStage,
-} from './services/firebase';
+} from './services/realtimeBattle';
 import { SailingTelemetry, TuvaluWorld } from './three/TuvaluWorld';
 import {
   BattlePlan,
@@ -89,7 +91,22 @@ import {
 } from './types/game';
 
 const LOCAL_INV_KEY = 'tuvalu_laguna_chef_inv_v1';
+const GUEST_SESSION_UID_KEY = 'tuvalu_guest_session_uid_v1';
 const GATHER_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes per rare ingredient
+
+function getOrCreateGuestSessionUid(): string {
+  try {
+    const existing = sessionStorage.getItem(GUEST_SESSION_UID_KEY);
+    if (existing && existing.startsWith('guest_') && existing.length >= 10) {
+      return existing;
+    }
+    const created = `guest_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    sessionStorage.setItem(GUEST_SESSION_UID_KEY, created);
+    return created;
+  } catch {
+    return `guest_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  }
+}
 
 function formatCooldownKo(ms: number): string {
   const totalSec = Math.max(1, Math.ceil(ms / 1000));
@@ -119,10 +136,12 @@ function loadLocalInventory(): {
   discoveredRecipeIds: string[];
   guestProfile: UserProfileData;
 } {
+  const guestUid = getOrCreateGuestSessionUid();
   try {
     const raw = localStorage.getItem(LOCAL_INV_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
+      const savedGuest = parsed.guestProfile;
       return {
         fishInventory: Array.isArray(parsed.fishInventory) ? parsed.fishInventory : [],
         pantry: parsed.pantry && typeof parsed.pantry === 'object' ? parsed.pantry : { funafuti_seasalt: 1 },
@@ -132,17 +151,22 @@ function loadLocalInventory(): {
         fishDexRecords:
           parsed.fishDexRecords && typeof parsed.fishDexRecords === 'object' ? parsed.fishDexRecords : {},
         discoveredRecipeIds: Array.isArray(parsed.discoveredRecipeIds) ? parsed.discoveredRecipeIds : [],
-        guestProfile: parsed.guestProfile ?? {
-          uid: 'guest',
-          displayName: '푸나푸티 셰프',
-          wins: 0,
-          losses: 0,
-          totalBattles: 0,
-          coins: 80,
-          fishCaughtCount: 0,
-          bestDishScore: 0,
-          rarestFishTier: 'none',
-        },
+        guestProfile: savedGuest && typeof savedGuest === 'object'
+          ? {
+              ...savedGuest,
+              uid: guestUid,
+            }
+          : {
+              uid: guestUid,
+              displayName: '푸나푸티 셰프',
+              wins: 0,
+              losses: 0,
+              totalBattles: 0,
+              coins: 80,
+              fishCaughtCount: 0,
+              bestDishScore: 0,
+              rarestFishTier: 'none',
+            },
       };
     }
   } catch {
@@ -156,7 +180,7 @@ function loadLocalInventory(): {
     fishDexRecords: {},
     discoveredRecipeIds: [],
     guestProfile: {
-      uid: 'guest',
+      uid: guestUid,
       displayName: '푸나푸티 셰프',
       wins: 0,
       losses: 0,
@@ -386,6 +410,10 @@ function GameApp() {
         authSyncPromiseRef.current = job;
       } else {
         setProfileInCloud(false);
+        const guestUid = getOrCreateGuestSessionUid();
+        setProfile((prev) =>
+          prev.uid.startsWith('guest_') ? prev : { ...prev, uid: guestUid },
+        );
       }
     });
     return () => unsub();
@@ -1125,7 +1153,10 @@ function GameApp() {
       battlePlan.rival,
     );
     if (realtimeRoomRef.current && realtimeRoleRef.current) {
-      void updateRealtimeBattleStage(realtimeRoomRef.current.roomId, realtimeRoleRef.current, {
+      const rtRoom = realtimeRoomRef.current;
+      const rtRole = realtimeRoleRef.current;
+      const selfUid = rtRole === 'host' ? rtRoom.hostUid : rtRoom.guestUid;
+      void updateRealtimeBattleStage(rtRoom.roomId, rtRole, selfUid, {
         stage: 'wash',
       });
     }
@@ -1189,12 +1220,13 @@ function GameApp() {
 
       const rtRoom = realtimeRoomRef.current;
       const rtRole = realtimeRoleRef.current;
+      const selfUid = rtRoom && rtRole ? (rtRole === 'host' ? rtRoom.hostUid : rtRoom.guestUid) : '';
 
       if (completed === 'wash') {
         setCookingStage('prep');
         worldRef.current?.setCookingStage('prep', battlePlan.fishSpecies, 0.5, battlePlan.ingredientIds, battlePlan.rival);
         if (rtRoom && rtRole) {
-          void updateRealtimeBattleStage(rtRoom.roomId, rtRole, {
+          void updateRealtimeBattleStage(rtRoom.roomId, rtRole, selfUid, {
             stage: 'prep',
             washScore: score,
           });
@@ -1203,7 +1235,7 @@ function GameApp() {
         setCookingStage('cook');
         worldRef.current?.setCookingStage('cook', battlePlan.fishSpecies, 0.55, battlePlan.ingredientIds, battlePlan.rival);
         if (rtRoom && rtRole) {
-          void updateRealtimeBattleStage(rtRoom.roomId, rtRole, {
+          void updateRealtimeBattleStage(rtRoom.roomId, rtRole, selfUid, {
             stage: 'cook',
             prepScore: score,
           });
@@ -1226,7 +1258,7 @@ function GameApp() {
             enrichedPlan.ingredientIds,
             enrichedPlan.rival,
           );
-          void submitRealtimeBattleFinish(rtRoom.roomId, rtRole, {
+          void submitRealtimeBattleFinish(rtRoom.roomId, rtRole, selfUid, {
             washScore: updatedScores.wash,
             prepScore: updatedScores.prep,
             cookScore: updatedScores.cook,
@@ -1343,8 +1375,9 @@ function GameApp() {
     const rtRole = realtimeRoleRef.current;
     const plan = battlePlanRef.current;
     if (!rtRoom || !rtRole || !plan) return;
+    const selfUid = rtRole === 'host' ? rtRoom.hostUid : rtRoom.guestUid;
     try {
-      const finished = await finalizeTimedOutRealtimeBattle(rtRoom.roomId, rtRole);
+      const finished = await finalizeTimedOutRealtimeBattle(rtRoom.roomId, rtRole, selfUid);
       const { nextVerdict, updatedPlan } = buildRealtimeVerdictPayload(finished, rtRole, plan);
       commitRealtimeVerdict(finished, updatedPlan, nextVerdict);
     } catch {
@@ -1473,7 +1506,10 @@ function GameApp() {
       if (e.code === 'Escape' && activeModal !== 'none') {
         e.preventDefault();
         if (activeModal === 'realtime_prep' && realtimeRoomRef.current && realtimeRoleRef.current) {
-          void cancelOrLeaveBattleRoom(realtimeRoomRef.current.roomId, realtimeRoleRef.current);
+          const rtRoom = realtimeRoomRef.current;
+          const rtRole = realtimeRoleRef.current;
+          const selfUid = rtRole === 'host' ? rtRoom.hostUid : rtRoom.guestUid;
+          void cancelOrLeaveBattleRoom(rtRoom.roomId, rtRole, selfUid);
           setRealtimeRoom(null);
           setRealtimeRole(null);
         }
@@ -2048,9 +2084,7 @@ function GameApp() {
           discoveredRecipeIds={discoveredRecipeIds}
           initialRoom={realtimeRoom}
           initialRole={realtimeRole}
-          onSignIn={async () => {
-            await handleSignIn();
-          }}
+          onUpdateDisplayName={(n) => void handleUpdateDisplayName(n)}
           onRoomBound={(nextRoom, nextRole) => {
             setRealtimeRoom(nextRoom);
             setRealtimeRole(nextRole);
